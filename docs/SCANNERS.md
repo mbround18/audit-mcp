@@ -6,17 +6,17 @@ Complete reference for all scanners supported by `audit-mcp`. Every scanner runs
 
 Scanners only receive an allowlisted set of host environment variables. Required values:
 
-| Scanner(s) | Required env vars | Optional allowlisted env vars |
-| ---------- | ----------------- | ------------------------------ |
-| `snyk`, `snyk-java`, `dotnet-snyk` | `SNYK_TOKEN` | `SNYK_API`, `SNYK_CFG_ORG` |
-| `dotnet-sonarscanner` | `SONAR_TOKEN`, `SONAR_HOST_URL` | `SONAR_PROJECT_KEY`, `SONAR_ORGANIZATION` |
+| Scanner(s)                         | Required env vars               | Optional allowlisted env vars             |
+| ---------------------------------- | ------------------------------- | ----------------------------------------- |
+| `snyk`, `snyk-java`, `dotnet-snyk` | `SNYK_TOKEN`                    | `SNYK_API`, `SNYK_CFG_ORG`                |
+| `dotnet-sonarscanner`              | `SONAR_TOKEN`, `SONAR_HOST_URL` | `SONAR_PROJECT_KEY`, `SONAR_ORGANIZATION` |
 
 Optional auth values passed when present:
 
-| Scanner | Optional env vars |
-| ------- | ----------------- |
-| `dependency-check` | `NVD_API_KEY` |
-| `checkov` | `BC_API_KEY` |
+| Scanner            | Optional env vars |
+| ------------------ | ----------------- |
+| `dependency-check` | `NVD_API_KEY`     |
+| `checkov`          | `BC_API_KEY`      |
 
 ## Rust
 
@@ -43,19 +43,19 @@ Cache volumes: `audit-cargo-home` (shared registry + binaries), `audit-target-<s
 
 Base image: `golang:1.24-bookworm`
 
-| Scanner         | Category         | Description                                                             |
-| --------------- | ---------------- | ----------------------------------------------------------------------- |
-| `govulncheck`   | Security (SCA)   | Official Go vulnerability scanner against the Go vulnerability database |
-| `gosec`         | Security (SAST)  | Inspects Go source for common security flaws                            |
-| `golangci-lint` | Linting          | Aggregates many Go linters in a single run                              |
-| `staticcheck`   | Code Quality     | Advanced static analysis and bug detection                              |
-| `goimports`     | Formatting       | Formats code and normalizes import grouping                             |
-| `gocyclo`       | Complexity       | Cyclomatic complexity per function                                      |
-| `nilaway`       | Code Reliability | Nil safety and panic prevention analysis                                |
-| `ineffassign`   | Optimization     | Finds ineffectual assignments                                           |
-| `go-carpet`     | Test Coverage    | Terminal-style coverage visualization                                   |
-| `revive`        | Linting & Quality| Fast, configurable, extensible linter for Go                            |
-| `errcheck`      | Code Reliability | Checks for unchecked errors in Go programs                              |
+| Scanner         | Category          | Description                                                             |
+| --------------- | ----------------- | ----------------------------------------------------------------------- |
+| `govulncheck`   | Security (SCA)    | Official Go vulnerability scanner against the Go vulnerability database |
+| `gosec`         | Security (SAST)   | Inspects Go source for common security flaws                            |
+| `golangci-lint` | Linting           | Aggregates many Go linters in a single run                              |
+| `staticcheck`   | Code Quality      | Advanced static analysis and bug detection                              |
+| `goimports`     | Formatting        | Formats code and normalizes import grouping                             |
+| `gocyclo`       | Complexity        | Cyclomatic complexity per function                                      |
+| `nilaway`       | Code Reliability  | Nil safety and panic prevention analysis                                |
+| `ineffassign`   | Optimization      | Finds ineffectual assignments                                           |
+| `go-carpet`     | Test Coverage     | Terminal-style coverage visualization                                   |
+| `revive`        | Linting & Quality | Fast, configurable, extensible linter for Go                            |
+| `errcheck`      | Code Reliability  | Checks for unchecked errors in Go programs                              |
 
 Cache volumes: `audit-go-mod-cache` (module downloads), `audit-go-build-cache` (build cache).
 
@@ -103,13 +103,13 @@ Cache volumes: `audit-npm-cache` (npm tarball cache), `audit-pnpm-store` (pnpm c
 
 These scanners run on **every** target regardless of inferred language (`mode=all` always includes them).
 
-| Scanner       | Image                              | Category         | Description                                              |
-| ------------- | ---------------------------------- | ---------------- | -------------------------------------------------------- |
-| `semgrep`     | `returntocorp/semgrep:latest`      | Security (SAST)  | Multi-language static analysis for security and correctness |
-| `gitleaks`    | `zricethezav/gitleaks:latest`      | Security (Secrets) | Detects hardcoded secrets and credentials in source code |
-| `osv-scanner` | `ghcr.io/google/osv-scanner:latest`| Security (SCA)   | Google's ecosystem-agnostic dependency vulnerability scanner |
-| `grype`       | `anchore/grype:latest`             | Security (SCA)   | Vulnerability scanner for repositories and filesystems   |
-| `bearer`      | `bearer/bearer:latest`             | Security (SAST)  | Multi-language SAST focused on security risks and data privacy |
+| Scanner       | Image                               | Category           | Description                                                    |
+| ------------- | ----------------------------------- | ------------------ | -------------------------------------------------------------- |
+| `semgrep`     | `returntocorp/semgrep:latest`       | Security (SAST)    | Multi-language static analysis for security and correctness    |
+| `gitleaks`    | `zricethezav/gitleaks:latest`       | Security (Secrets) | Detects hardcoded secrets and credentials in source code       |
+| `osv-scanner` | `ghcr.io/google/osv-scanner:latest` | Security (SCA)     | Google's ecosystem-agnostic dependency vulnerability scanner   |
+| `grype`       | `anchore/grype:latest`              | Security (SCA)     | Vulnerability scanner for repositories and filesystems         |
+| `bearer`      | `bearer/bearer:latest`              | Security (SAST)    | Multi-language SAST focused on security risks and data privacy |
 
 Cache volumes: `audit-grype-db` (Grype vulnerability DB), `audit-osv-cache` (OSV cache).
 
@@ -117,16 +117,16 @@ Cache volumes: `audit-grype-db` (Grype vulnerability DB), `audit-osv-cache` (OSV
 
 Base images: `bridgecrew/checkov:latest`, `aquasec/tfsec:latest`, `stackrox/kube-linter:latest`, `aquasec/trivy:latest`, `hadolint/hadolint:latest-alpine`, `kubesec/kubesec:v2`, `openpolicyagent/conftest:latest`, `tenable/terrascan:latest`
 
-| Scanner        | Category              | Description                                                          |
-| -------------- | --------------------- | -------------------------------------------------------------------- |
-| `checkov`      | Security (IaC)        | Terraform and Kubernetes policy/security checks                      |
-| `tfsec`        | Security (IaC)        | Terraform-focused security misconfiguration detection                |
-| `kube-linter`  | Security (Kubernetes) | Kubernetes manifest and workload policy checks                       |
-| `trivy-config` | Security (IaC)        | IaC and Kubernetes configuration scanning with Trivy                 |
-| `hadolint`     | Security (Containers) | Dockerfile linting for security and best-practice violations         |
-| `kubesec`      | Security (Kubernetes) | Security risk analysis and scoring for Kubernetes YAML resources     |
-| `conftest`     | Security (Policy)     | Tests configuration files using Open Policy Agent Rego policies      |
-| `terrascan`    | Security (IaC)        | Static analysis for Terraform, Kubernetes, ARM, and CloudFormation   |
+| Scanner        | Category              | Description                                                        |
+| -------------- | --------------------- | ------------------------------------------------------------------ |
+| `checkov`      | Security (IaC)        | Terraform and Kubernetes policy/security checks                    |
+| `tfsec`        | Security (IaC)        | Terraform-focused security misconfiguration detection              |
+| `kube-linter`  | Security (Kubernetes) | Kubernetes manifest and workload policy checks                     |
+| `trivy-config` | Security (IaC)        | IaC and Kubernetes configuration scanning with Trivy               |
+| `hadolint`     | Security (Containers) | Dockerfile linting for security and best-practice violations       |
+| `kubesec`      | Security (Kubernetes) | Security risk analysis and scoring for Kubernetes YAML resources   |
+| `conftest`     | Security (Policy)     | Tests configuration files using Open Policy Agent Rego policies    |
+| `terrascan`    | Security (IaC)        | Static analysis for Terraform, Kubernetes, ARM, and CloudFormation |
 
 Cache volumes: `audit-checkov-cache` (checkov cache), `audit-trivy-cache` (trivy DB/cache).
 
@@ -134,18 +134,18 @@ Cache volumes: `audit-checkov-cache` (checkov cache), `audit-trivy-cache` (trivy
 
 Base image: `koalaman/shellcheck-alpine:stable`
 
-| Scanner      | Category       | Description                                     |
-| ------------ | -------------- | ----------------------------------------------- |
-| `shellcheck` | Security (SAST)| Static analysis and best-practice linter for shell scripts |
+| Scanner      | Category        | Description                                                |
+| ------------ | --------------- | ---------------------------------------------------------- |
+| `shellcheck` | Security (SAST) | Static analysis and best-practice linter for shell scripts |
 
 ## Kotlin
 
 Base image: `eclipse-temurin:21-alpine`
 
-| Scanner  | Category            | Description                                                 |
-| -------- | ------------------- | ----------------------------------------------------------- |
-| `detekt` | Code Quality        | Static analysis for Kotlin with code smell and security checks |
-| `ktlint` | Linting & Formatting| Kotlin linter and formatter following the official style guide |
+| Scanner  | Category             | Description                                                    |
+| -------- | -------------------- | -------------------------------------------------------------- |
+| `detekt` | Code Quality         | Static analysis for Kotlin with code smell and security checks |
+| `ktlint` | Linting & Formatting | Kotlin linter and formatter following the official style guide |
 
 Cache volumes: `audit-gradle-home` (Gradle user home / caches).
 
@@ -153,10 +153,10 @@ Cache volumes: `audit-gradle-home` (Gradle user home / caches).
 
 Base image: `elixir:1.18-slim`
 
-| Scanner   | Category       | Description                                                        |
-| --------- | -------------- | ------------------------------------------------------------------ |
-| `credo`   | Code Quality   | Static code analysis for Elixir with consistency and quality checks |
-| `sobelow` | Security (SAST)| Security-focused static analysis for Phoenix and Elixir applications |
+| Scanner   | Category        | Description                                                          |
+| --------- | --------------- | -------------------------------------------------------------------- |
+| `credo`   | Code Quality    | Static code analysis for Elixir with consistency and quality checks  |
+| `sobelow` | Security (SAST) | Security-focused static analysis for Phoenix and Elixir applications |
 
 Cache volumes: `audit-hex-packages` (Hex package cache), `audit-mix-build` (Mix build artifacts).
 
@@ -164,9 +164,9 @@ Cache volumes: `audit-hex-packages` (Hex package cache), `audit-mix-build` (Mix 
 
 Base image: `ghcr.io/astral-sh/uv:latest`
 
-| Scanner     | Category            | Description                                          |
-| ----------- | ------------------- | ---------------------------------------------------- |
-| `sqlfluff`  | Linting & Formatting| SQL linter and formatter with multi-dialect support  |
+| Scanner    | Category             | Description                                         |
+| ---------- | -------------------- | --------------------------------------------------- |
+| `sqlfluff` | Linting & Formatting | SQL linter and formatter with multi-dialect support |
 
 ## Java
 

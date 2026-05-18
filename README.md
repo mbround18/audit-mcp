@@ -73,23 +73,23 @@ Takes an array of normalized findings, returns minimal fix suggestions.
 
 ## Supported languages and scanners
 
-| Language              | Scanners                                                                                                                                                                        |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Rust                  | `cargo-audit`, `cargo-clippy`, `cargo-deny`, `cargo-fmt`, `cargo-machete`, `cargo-bloat`, `cargo-tarpaulin`, `cargo-llvm-cov`, `cargo-outdated`, `cargo-mutants`, `cargo-geiger`, `cargo-udeps` |
-| Go                    | `govulncheck`, `gosec`, `golangci-lint`, `staticcheck`, `goimports`, `gocyclo`, `nilaway`, `ineffassign`, `go-carpet`, `revive`, `errcheck`                                    |
-| Python                | `bandit`, `safety`, `ruff`, `black`, `mypy`, `pip-audit`, `vulture`, `flake8`, `isort`, `radon`                                                                                 |
-| Node                  | `knip`, `snyk`, `retire`, `auditjs`, `eslint`, `prettier`, `depcheck`, `license-checker`, `lighthouse`, `bundlephobia`, `oxlint`, `npm-audit`                                  |
-| IaC/K8s               | `checkov`, `tfsec`, `kube-linter`, `trivy-config`, `hadolint`, `kubesec`, `conftest`, `terrascan`                                                                               |
-| Cross-language (always-on) | `semgrep`, `gitleaks`, `osv-scanner`, `grype`, `bearer`                                                                                                                              |
-| Java                  | `spotbugs`, `pmd`, `checkstyle`, `snyk-java`, `google-java-format`, `palantir-java-format`, `dependency-check`, `error-prone`, `jdk-flight-recorder`                          |
-| Ruby                  | `brakeman`, `bundler-audit`, `rubocop`, `pronto`, `debride`, `flay`, `flog`, `standardrb`, `license_finder`                                                                    |
-| PHP                   | `phpstan`, `psalm`, `phpcs`, `rector`, `enlightn`                                                                                                                               |
-| .NET                  | `dotnet-format`, `roslyn-analyzers`, `dotnet-sonarscanner`, `dotnet-snyk`, `jb-inspectcode`                                                                                    |
-| C/C++                 | `clang-tidy`, `cppcheck`, `clang-format`, `flawfinder`                                                                                                                          |
-| Shell                 | `shellcheck`                                                                                                                                                                    |
-| Kotlin                | `detekt`, `ktlint`                                                                                                                                                              |
-| Elixir                | `credo`, `sobelow`                                                                                                                                                              |
-| SQL                   | `sqlfluff`                                                                                                                                                                      |
+| Language                   | Scanners                                                                                                                                                                                        |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Rust                       | `cargo-audit`, `cargo-clippy`, `cargo-deny`, `cargo-fmt`, `cargo-machete`, `cargo-bloat`, `cargo-tarpaulin`, `cargo-llvm-cov`, `cargo-outdated`, `cargo-mutants`, `cargo-geiger`, `cargo-udeps` |
+| Go                         | `govulncheck`, `gosec`, `golangci-lint`, `staticcheck`, `goimports`, `gocyclo`, `nilaway`, `ineffassign`, `go-carpet`, `revive`, `errcheck`                                                     |
+| Python                     | `bandit`, `safety`, `ruff`, `black`, `mypy`, `pip-audit`, `vulture`, `flake8`, `isort`, `radon`                                                                                                 |
+| Node                       | `knip`, `snyk`, `retire`, `auditjs`, `eslint`, `prettier`, `depcheck`, `license-checker`, `lighthouse`, `bundlephobia`, `oxlint`, `npm-audit`                                                   |
+| IaC/K8s                    | `checkov`, `tfsec`, `kube-linter`, `trivy-config`, `hadolint`, `kubesec`, `conftest`, `terrascan`                                                                                               |
+| Cross-language (always-on) | `semgrep`, `gitleaks`, `osv-scanner`, `grype`, `bearer`                                                                                                                                         |
+| Java                       | `spotbugs`, `pmd`, `checkstyle`, `snyk-java`, `google-java-format`, `palantir-java-format`, `dependency-check`, `error-prone`, `jdk-flight-recorder`                                            |
+| Ruby                       | `brakeman`, `bundler-audit`, `rubocop`, `pronto`, `debride`, `flay`, `flog`, `standardrb`, `license_finder`                                                                                     |
+| PHP                        | `phpstan`, `psalm`, `phpcs`, `rector`, `enlightn`                                                                                                                                               |
+| .NET                       | `dotnet-format`, `roslyn-analyzers`, `dotnet-sonarscanner`, `dotnet-snyk`, `jb-inspectcode`                                                                                                     |
+| C/C++                      | `clang-tidy`, `cppcheck`, `clang-format`, `flawfinder`                                                                                                                                          |
+| Shell                      | `shellcheck`                                                                                                                                                                                    |
+| Kotlin                     | `detekt`, `ktlint`                                                                                                                                                                              |
+| Elixir                     | `credo`, `sobelow`                                                                                                                                                                              |
+| SQL                        | `sqlfluff`                                                                                                                                                                                      |
 
 ## How it works
 
