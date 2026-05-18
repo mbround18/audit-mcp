@@ -47,12 +47,12 @@ Returns the full scanner catalog with names, descriptions, and categories. No ar
 
 ### `run_scan`
 
-| Field | Type | Description |
-|---|---|---|
-| `target` | `string` | Absolute path to the directory to scan |
-| `mode` | `"single" \| "many" \| "all"` | How scanners are selected (default: `single`) |
-| `scanner` | `string` | Scanner name — required when `mode=single` |
-| `scanners` | `string[]` | Scanner names — required when `mode=many` |
+| Field      | Type                          | Description                                   |
+| ---------- | ----------------------------- | --------------------------------------------- |
+| `target`   | `string`                      | Absolute path to the directory to scan        |
+| `mode`     | `"single" \| "many" \| "all"` | How scanners are selected (default: `single`) |
+| `scanner`  | `string`                      | Scanner name — required when `mode=single`    |
+| `scanners` | `string[]`                    | Scanner names — required when `mode=many`     |
 
 `mode=all` auto-selects scanners by inferring the project language from the target path.
 
@@ -66,17 +66,17 @@ Takes an array of normalized findings, returns minimal fix suggestions.
 
 ## Supported languages and scanners
 
-| Language | Scanners |
-|---|---|
-| Rust | `cargo-audit`, `cargo-clippy`, `cargo-deny`, `cargo-fmt`, `cargo-machete`, `cargo-bloat`, `cargo-tarpaulin`, `cargo-llvm-cov`, `cargo-outdated`, `cargo-mutants` |
-| Go | `govulncheck`, `gosec`, `golangci-lint`, `staticcheck`, `goimports`, `gocyclo`, `nilaway`, `ineffassign`, `go-carpet` |
-| Python | `bandit`, `safety`, `ruff`, `black`, `mypy`, `pip-audit`, `vulture`, `flake8`, `isort`, `radon` |
-| Node | `knip`, `snyk`, `retire`, `auditjs`, `eslint`, `prettier`, `depcheck`, `license-checker`, `lighthouse`, `bundlephobia` |
-| Java | `spotbugs`, `pmd`, `checkstyle`, `snyk-java`, `google-java-format`, `palantir-java-format`, `dependency-check`, `error-prone`, `jdk-flight-recorder` |
-| Ruby | `brakeman`, `bundler-audit`, `rubocop`, `pronto`, `debride`, `flay`, `flog`, `standardrb`, `license_finder` |
-| PHP | `phpstan`, `psalm`, `phpcs`, `rector`, `enlightn` |
-| .NET | `dotnet-format`, `roslyn-analyzers`, `dotnet-sonarscanner`, `dotnet-snyk`, `jb-inspectcode` |
-| C/C++ | `clang-tidy`, `cppcheck`, `clang-format`, `flawfinder` |
+| Language | Scanners                                                                                                                                                         |
+| -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Rust     | `cargo-audit`, `cargo-clippy`, `cargo-deny`, `cargo-fmt`, `cargo-machete`, `cargo-bloat`, `cargo-tarpaulin`, `cargo-llvm-cov`, `cargo-outdated`, `cargo-mutants` |
+| Go       | `govulncheck`, `gosec`, `golangci-lint`, `staticcheck`, `goimports`, `gocyclo`, `nilaway`, `ineffassign`, `go-carpet`                                            |
+| Python   | `bandit`, `safety`, `ruff`, `black`, `mypy`, `pip-audit`, `vulture`, `flake8`, `isort`, `radon`                                                                  |
+| Node     | `knip`, `snyk`, `retire`, `auditjs`, `eslint`, `prettier`, `depcheck`, `license-checker`, `lighthouse`, `bundlephobia`                                           |
+| Java     | `spotbugs`, `pmd`, `checkstyle`, `snyk-java`, `google-java-format`, `palantir-java-format`, `dependency-check`, `error-prone`, `jdk-flight-recorder`             |
+| Ruby     | `brakeman`, `bundler-audit`, `rubocop`, `pronto`, `debride`, `flay`, `flog`, `standardrb`, `license_finder`                                                      |
+| PHP      | `phpstan`, `psalm`, `phpcs`, `rector`, `enlightn`                                                                                                                |
+| .NET     | `dotnet-format`, `roslyn-analyzers`, `dotnet-sonarscanner`, `dotnet-snyk`, `jb-inspectcode`                                                                      |
+| C/C++    | `clang-tidy`, `cppcheck`, `clang-format`, `flawfinder`                                                                                                           |
 
 ## How it works
 

@@ -27,6 +27,7 @@ Process entry point only. Creates an `AuditMcpServer`, wraps it in the RMCP stdi
 The MCP surface. Defines tool request/response DTOs and wires them to handler methods via the `#[tool_router]` and `#[tool_handler]` RMCP macros. Nothing in this file touches Docker or filesystem.
 
 Tools:
+
 - `list_scanners` — delegates to `ScannerRegistry::list_summaries`
 - `run_scan` — validates request, resolves scanner set, fans out to `DockerScannerRunner` in parallel with `join_all`
 - `explain_finding` — delegates to `FindingExplainer`
@@ -63,12 +64,12 @@ The Docker layer. `DockerScannerRunner` owns a `bollard::Docker` client and is r
 
 **Security constraints applied to every container:**
 
-| Constraint | Value | Reason |
-|---|---|---|
-| Workspace mount | `:ro` | Scanner cannot modify source |
-| `SecurityOpt` | `no-new-privileges:true` | Blocks setuid/sudo escalation |
-| `CapDrop` | `ALL` | Removes all Linux capabilities |
-| `Memory` | 4 GB | Bounds compiler memory usage |
+| Constraint      | Value                    | Reason                         |
+| --------------- | ------------------------ | ------------------------------ |
+| Workspace mount | `:ro`                    | Scanner cannot modify source   |
+| `SecurityOpt`   | `no-new-privileges:true` | Blocks setuid/sudo escalation  |
+| `CapDrop`       | `ALL`                    | Removes all Linux capabilities |
+| `Memory`        | 4 GB                     | Bounds compiler memory usage   |
 
 **Cache volumes** are named Docker volumes mounted at `/cache/*` inside the container. Environment variables (`CARGO_HOME`, `UV_CACHE_DIR`, `GEM_HOME`, etc.) redirect each ecosystem's tooling to those paths. This means package downloads and compiled artifacts persist across runs without any host filesystem exposure.
 

@@ -45,15 +45,15 @@ The CI pipeline runs `cargo clippy -- -D warnings`, `cargo fmt -- --check`, and 
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for a full walkthrough. The short version:
 
-| File | What to change there |
-|---|---|
-| `src/scanners.rs` | Add, remove, or update scanner definitions |
+| File               | What to change there                                                               |
+| ------------------ | ---------------------------------------------------------------------------------- |
+| `src/scanners.rs`  | Add, remove, or update scanner definitions                                         |
 | `src/selection.rs` | Change which scanners are selected for a language, or add language inference rules |
-| `src/runner.rs` | Change container lifecycle, security constraints, or cache volume layout |
-| `src/models.rs` | Change the shared data contract (findings, execution metadata, etc.) |
-| `src/server.rs` | Add or change MCP-exposed tools |
-| `src/explain.rs` | Add finding explanations for a scanner |
-| `src/fixes.rs` | Add fix suggestions for a scanner |
+| `src/runner.rs`    | Change container lifecycle, security constraints, or cache volume layout           |
+| `src/models.rs`    | Change the shared data contract (findings, execution metadata, etc.)               |
+| `src/server.rs`    | Add or change MCP-exposed tools                                                    |
+| `src/explain.rs`   | Add finding explanations for a scanner                                             |
+| `src/fixes.rs`     | Add fix suggestions for a scanner                                                  |
 
 ## Adding a scanner
 
@@ -87,8 +87,8 @@ When naming scanners, use the tool's canonical CLI name as it appears in its own
 
 ## Code style
 
-- No comments that describe *what* the code does — the code should be self-explanatory.
-- One short comment is acceptable when the *why* is non-obvious (a hidden constraint, a workaround for a specific bug, etc.).
+- No comments that describe _what_ the code does — the code should be self-explanatory.
+- One short comment is acceptable when the _why_ is non-obvious (a hidden constraint, a workaround for a specific bug, etc.).
 - No `#[allow(clippy::*)]` suppressions without a justification comment.
 - Prefer returning `Err(String)` from `runner.rs` functions — the error string becomes the MCP tool error message, so write it for a user, not a developer.
 

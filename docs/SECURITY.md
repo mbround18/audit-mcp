@@ -2,9 +2,9 @@
 
 ## Supported versions
 
-| Version | Supported |
-|---|---|
-| `main` branch | Yes |
+| Version         | Supported   |
+| --------------- | ----------- |
+| `main` branch   | Yes         |
 | Tagged releases | Latest only |
 
 Only the current `main` branch receives security fixes. If you are running an older release, please update before reporting.
@@ -30,13 +30,13 @@ If the report is confirmed, a fix will be prepared and released as soon as pract
 
 Every scanner runs in an ephemeral Docker container with the following constraints enforced unconditionally by `runner.rs`:
 
-| Constraint | Details |
-|---|---|
-| Workspace mount | Target directory mounted read-only (`:ro`) — scanners cannot write to source |
-| `no-new-privileges` | Applied via `SecurityOpt` — blocks `setuid`, `sudo`, and capability escalation inside the container |
-| `CapDrop: ALL` | All Linux capabilities are dropped — containers cannot bind privileged ports, manipulate network interfaces, or access raw sockets |
-| Memory limit | 4 GB ceiling — prevents a runaway compiler from consuming host memory |
-| Ephemeral | Containers are removed immediately after the scan completes or fails |
+| Constraint          | Details                                                                                                                            |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| Workspace mount     | Target directory mounted read-only (`:ro`) — scanners cannot write to source                                                       |
+| `no-new-privileges` | Applied via `SecurityOpt` — blocks `setuid`, `sudo`, and capability escalation inside the container                                |
+| `CapDrop: ALL`      | All Linux capabilities are dropped — containers cannot bind privileged ports, manipulate network interfaces, or access raw sockets |
+| Memory limit        | 4 GB ceiling — prevents a runaway compiler from consuming host memory                                                              |
+| Ephemeral           | Containers are removed immediately after the scan completes or fails                                                               |
 
 ### Target path validation
 
