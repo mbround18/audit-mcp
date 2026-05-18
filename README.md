@@ -82,10 +82,10 @@ Takes an array of normalized findings, returns minimal fix suggestions.
 
 ```mermaid
 flowchart TD
-    A[MCP client (Claude, etc.)] -->|run_scan { target, scanner }| B[AuditMcpServer (stdio)]
-    B -->|resolves scanner definition| C[DockerScannerRunner]
-    C -->|pulls image if needed<br/>mounts target read-only at /workspace<br/>mounts shared cache volumes<br/>applies security constraints| D[Docker container (ephemeral)]
-    D -->|runs scanner command| E[NormalizedFinding[]]
+    A["MCP client (Claude, etc.)"] -->|"run_scan target + scanner"| B["AuditMcpServer (stdio)"]
+    B -->|"resolves scanner definition"| C["DockerScannerRunner"]
+    C -->|"pulls image if needed<br/>mounts target read-only at /workspace<br/>mounts shared cache volumes<br/>applies security constraints"| D["Docker container (ephemeral)"]
+    D -->|"runs scanner command"| E["NormalizedFinding[]"]
     E --> A
 ```
 

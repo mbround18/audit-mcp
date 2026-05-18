@@ -6,14 +6,14 @@
 
 ```mermaid
 flowchart TD
-    SRC[src/] --> MAIN[main.rs<br/>bootstrap: creates AuditMcpServer, serves over stdio]
-    SRC --> SERVER[server.rs<br/>MCP boundary: tool definitions, request routing]
-    SRC --> MODELS[models.rs<br/>shared data contract (findings, scanner definitions, etc.)]
-    SRC --> SCANNERS[scanners.rs<br/>static scanner catalog and registry]
-    SRC --> RUNNER[runner.rs<br/>Docker container lifecycle and finding production]
-    SRC --> SELECTION[selection.rs<br/>language-based scanner auto-selection]
-    SRC --> EXPLAIN[explain.rs<br/>finding explanation knowledge base]
-    SRC --> FIXES[fixes.rs<br/>remediation suggestion generation]
+    SRC["src/"] --> MAIN["main.rs<br/>bootstrap: creates AuditMcpServer, serves over stdio"]
+    SRC --> SERVER["server.rs<br/>MCP boundary: tool definitions, request routing"]
+    SRC --> MODELS["models.rs<br/>shared data contract (findings, scanner definitions, etc.)"]
+    SRC --> SCANNERS["scanners.rs<br/>static scanner catalog and registry"]
+    SRC --> RUNNER["runner.rs<br/>Docker container lifecycle and finding production"]
+    SRC --> SELECTION["selection.rs<br/>language-based scanner auto-selection"]
+    SRC --> EXPLAIN["explain.rs<br/>finding explanation knowledge base"]
+    SRC --> FIXES["fixes.rs<br/>remediation suggestion generation"]
 ```
 
 ## Module responsibilities
@@ -88,18 +88,18 @@ Knowledge-base modules that return contextual explanations and fix suggestions g
 
 ```mermaid
 flowchart TD
-    A[run_scan request] --> B[resolve_scanners_for_request()<br/>validates scanner names against ScannerRegistry]
-    B --> C[join_all() - parallel fanout]
-    C --> D[DockerScannerRunner::run_scan()]
-    D --> D1[resolve_target()<br/>canonicalize path]
-    D1 --> D2[ensure_image_available()<br/>pull if needed]
-    D2 --> D3[image_cache_config()<br/>volumes + env vars]
-    D3 --> D4[create_container()<br/>apply security opts]
-    D4 --> D5[start_container() and wait_container()]
-    D5 --> D6[logs()<br/>collect stdout+stderr]
-    D6 --> D7[cleanup_container()<br/>always runs]
-    D7 --> D8[NormalizedFinding]
-    D8 --> E[RunScanResponse]
+    A["run_scan request"] --> B["resolve_scanners_for_request()<br/>validates scanner names against ScannerRegistry"]
+    B --> C["join_all() - parallel fanout"]
+    C --> D["DockerScannerRunner::run_scan()"]
+    D --> D1["resolve_target()<br/>canonicalize path"]
+    D1 --> D2["ensure_image_available()<br/>pull if needed"]
+    D2 --> D3["image_cache_config()<br/>volumes + env vars"]
+    D3 --> D4["create_container()<br/>apply security opts"]
+    D4 --> D5["start_container() and wait_container()"]
+    D5 --> D6["logs()<br/>collect stdout+stderr"]
+    D6 --> D7["cleanup_container()<br/>always runs"]
+    D7 --> D8["NormalizedFinding"]
+    D8 --> E["RunScanResponse"]
 ```
 
 ## Adding a new scanner
