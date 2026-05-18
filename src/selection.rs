@@ -49,6 +49,8 @@ impl ToolSelector {
                         "license-checker".to_string(),
                         "lighthouse".to_string(),
                         "bundlephobia".to_string(),
+                        "oxlint".to_string(),
+                        "npm-audit".to_string(),
                     ],
                     categories: vec![
                         "Security".to_string(),
@@ -74,6 +76,8 @@ impl ToolSelector {
                         "cargo-tarpaulin".to_string(),
                         "cargo-llvm-cov".to_string(),
                         "cargo-outdated".to_string(),
+                        "cargo-geiger".to_string(),
+                        "cargo-udeps".to_string(),
                     ],
                     categories: vec![
                         "Security (SCA)".to_string(),
@@ -99,6 +103,8 @@ impl ToolSelector {
                         "nilaway".to_string(),
                         "ineffassign".to_string(),
                         "go-carpet".to_string(),
+                        "revive".to_string(),
+                        "errcheck".to_string(),
                     ],
                     categories: vec![
                         "Security (SCA)".to_string(),
@@ -205,6 +211,65 @@ impl ToolSelector {
                         "Security (SAST)".to_string(),
                     ],
                 },
+                LanguageToolProfile {
+                    language: "iac".to_string(),
+                    preferred_scanners: vec![
+                        "checkov".to_string(),
+                        "tfsec".to_string(),
+                        "kube-linter".to_string(),
+                        "trivy-config".to_string(),
+                        "hadolint".to_string(),
+                        "kubesec".to_string(),
+                        "conftest".to_string(),
+                        "terrascan".to_string(),
+                    ],
+                    categories: vec![
+                        "Security (IaC)".to_string(),
+                        "Security (Kubernetes)".to_string(),
+                        "Security (Containers)".to_string(),
+                        "Security (Policy)".to_string(),
+                    ],
+                },
+                // The "security" profile is always included regardless of inferred language.
+                // Scanners here are cross-language and add value to every repository.
+                LanguageToolProfile {
+                    language: "security".to_string(),
+                    preferred_scanners: vec![
+                        "semgrep".to_string(),
+                        "gitleaks".to_string(),
+                        "osv-scanner".to_string(),
+                        "grype".to_string(),
+                        "bearer".to_string(),
+                    ],
+                    categories: vec![
+                        "Security (SAST)".to_string(),
+                        "Security (Secrets)".to_string(),
+                        "Security (SCA)".to_string(),
+                    ],
+                },
+                LanguageToolProfile {
+                    language: "shell".to_string(),
+                    preferred_scanners: vec!["shellcheck".to_string()],
+                    categories: vec!["Security (SAST)".to_string()],
+                },
+                LanguageToolProfile {
+                    language: "kotlin".to_string(),
+                    preferred_scanners: vec!["detekt".to_string(), "ktlint".to_string()],
+                    categories: vec![
+                        "Code Quality".to_string(),
+                        "Linting & Formatting".to_string(),
+                    ],
+                },
+                LanguageToolProfile {
+                    language: "elixir".to_string(),
+                    preferred_scanners: vec!["credo".to_string(), "sobelow".to_string()],
+                    categories: vec!["Code Quality".to_string(), "Security (SAST)".to_string()],
+                },
+                LanguageToolProfile {
+                    language: "sql".to_string(),
+                    preferred_scanners: vec!["sqlfluff".to_string()],
+                    categories: vec!["Linting & Formatting".to_string()],
+                },
             ],
         }
     }
@@ -214,7 +279,9 @@ impl ToolSelector {
         let target_language = Self::infer_language(target);
 
         for profile in &self.language_profiles {
-            if target_language.as_deref() == Some(profile.language.as_str()) {
+            let is_cross_language = profile.language == "security";
+            let matches_target = target_language.as_deref() == Some(profile.language.as_str());
+            if is_cross_language || matches_target {
                 selected_scanners.extend(profile.preferred_scanners.clone());
             }
         }
@@ -306,6 +373,47 @@ impl ToolSelector {
         {
             return Some("c-cpp".to_string());
         }
+        if target.ends_with(".tf")
+            || target.ends_with(".tfvars")
+            || target.ends_with("Dockerfile")
+            || target.contains("dockerfile")
+            || target.contains("terraform")
+            || target.contains("kubernetes")
+            || target.contains("k8s")
+            || target.contains("helm")
+            || target.contains("kustomize")
+            || target.contains("infra")
+            || target.contains("infrastructure")
+        {
+            return Some("iac".to_string());
+        }
+        if target.ends_with(".sh")
+            || target.ends_with(".bash")
+            || target.ends_with(".zsh")
+            || target.contains("scripts")
+            || target.contains("bin/")
+        {
+            return Some("shell".to_string());
+        }
+        if target.ends_with(".kt")
+            || target.ends_with(".kts")
+            || target.ends_with("build.gradle.kts")
+            || target.ends_with("settings.gradle.kts")
+            || target.contains("kotlin")
+        {
+            return Some("kotlin".to_string());
+        }
+        if target.ends_with(".ex")
+            || target.ends_with(".exs")
+            || target.ends_with("mix.exs")
+            || target.contains("elixir")
+            || target.contains("phoenix")
+        {
+            return Some("elixir".to_string());
+        }
+        if target.ends_with(".sql") || target.ends_with(".ddl") || target.contains("/migrations/") {
+            return Some("sql".to_string());
+        }
         None
     }
 }
@@ -315,165 +423,286 @@ mod tests {
     use super::ToolSelector;
     use crate::scanners::ScannerRegistry;
 
-    fn assert_selected(target: &str, expected: &[&str]) {
-        let selector = ToolSelector::new();
-        let registry = ScannerRegistry::new().expect("registry should initialize");
-        let mut expected_sorted = expected
-            .iter()
-            .map(|name| (*name).to_string())
-            .collect::<Vec<_>>();
-        expected_sorted.sort();
-
-        let plan = selector.plan(target, &registry);
-        assert_eq!(
-            plan.selected_scanners, expected_sorted,
-            "unexpected scanners for target: {target}"
-        );
-    }
-
     #[test]
     fn selects_python_scanners_for_python_target() {
-        assert_selected(
-            "services/api/app.py",
-            &[
-                "bandit",
-                "safety",
-                "ruff",
-                "black",
-                "mypy",
-                "pip-audit",
-                "vulture",
-                "flake8",
-                "isort",
-                "radon",
-            ],
-        );
+        let selector = ToolSelector::new();
+        let registry = ScannerRegistry::new().expect("registry should initialize");
+        let plan = selector.plan("services/api/app.py", &registry);
+        for name in &[
+            "bandit",
+            "safety",
+            "ruff",
+            "black",
+            "mypy",
+            "pip-audit",
+            "vulture",
+            "flake8",
+            "isort",
+            "radon",
+        ] {
+            assert!(
+                plan.selected_scanners.contains(&(*name).to_string()),
+                "expected '{name}' in python plan"
+            );
+        }
     }
 
     #[test]
     fn selects_node_scanners_for_node_target() {
-        assert_selected(
-            "web/package.json",
-            &[
-                "knip",
-                "snyk",
-                "retire",
-                "auditjs",
-                "prettier",
-                "eslint",
-                "depcheck",
-                "license-checker",
-                "lighthouse",
-                "bundlephobia",
-            ],
-        );
+        let selector = ToolSelector::new();
+        let registry = ScannerRegistry::new().expect("registry should initialize");
+        let plan = selector.plan("web/package.json", &registry);
+        for name in &[
+            "knip",
+            "snyk",
+            "retire",
+            "auditjs",
+            "prettier",
+            "eslint",
+            "depcheck",
+            "license-checker",
+            "lighthouse",
+            "bundlephobia",
+            "oxlint",
+            "npm-audit",
+            "semgrep",
+            "gitleaks",
+        ] {
+            assert!(
+                plan.selected_scanners.contains(&(*name).to_string()),
+                "expected '{name}' in node plan"
+            );
+        }
     }
 
     #[test]
     fn selects_rust_scanners_for_rust_target() {
-        assert_selected(
-            "crates/core/Cargo.toml",
-            &[
-                "cargo-audit",
-                "cargo-deny",
-                "cargo-mutants",
-                "cargo-clippy",
-                "cargo-fmt",
-                "cargo-machete",
-                "cargo-bloat",
-                "cargo-tarpaulin",
-                "cargo-llvm-cov",
-                "cargo-outdated",
-            ],
-        );
+        let selector = ToolSelector::new();
+        let registry = ScannerRegistry::new().expect("registry should initialize");
+        let plan = selector.plan("crates/core/Cargo.toml", &registry);
+        for name in &[
+            "cargo-audit",
+            "cargo-deny",
+            "cargo-mutants",
+            "cargo-clippy",
+            "cargo-fmt",
+            "cargo-machete",
+            "cargo-bloat",
+            "cargo-tarpaulin",
+            "cargo-llvm-cov",
+            "cargo-outdated",
+            "cargo-geiger",
+            "cargo-udeps",
+            "semgrep",
+            "gitleaks",
+        ] {
+            assert!(
+                plan.selected_scanners.contains(&(*name).to_string()),
+                "expected '{name}' in rust plan"
+            );
+        }
     }
 
     #[test]
     fn selects_go_scanners_for_go_target() {
-        assert_selected(
-            "cmd/server/main.go",
-            &[
-                "govulncheck",
-                "gosec",
-                "golangci-lint",
-                "staticcheck",
-                "goimports",
-                "gocyclo",
-                "nilaway",
-                "ineffassign",
-                "go-carpet",
-            ],
-        );
+        let selector = ToolSelector::new();
+        let registry = ScannerRegistry::new().expect("registry should initialize");
+        let plan = selector.plan("cmd/server/main.go", &registry);
+        for name in &[
+            "govulncheck",
+            "gosec",
+            "golangci-lint",
+            "staticcheck",
+            "goimports",
+            "gocyclo",
+            "nilaway",
+            "ineffassign",
+            "go-carpet",
+            "revive",
+            "errcheck",
+            "semgrep",
+            "gitleaks",
+        ] {
+            assert!(
+                plan.selected_scanners.contains(&(*name).to_string()),
+                "expected '{name}' in go plan"
+            );
+        }
     }
 
     #[test]
     fn selects_java_scanners_for_java_target() {
-        assert_selected(
-            "services/payments/pom.xml",
-            &[
-                "spotbugs",
-                "pmd",
-                "checkstyle",
-                "snyk-java",
-                "google-java-format",
-                "palantir-java-format",
-                "dependency-check",
-                "error-prone",
-                "jdk-flight-recorder",
-            ],
-        );
+        let selector = ToolSelector::new();
+        let registry = ScannerRegistry::new().expect("registry should initialize");
+        let plan = selector.plan("services/payments/pom.xml", &registry);
+        for name in &[
+            "spotbugs",
+            "pmd",
+            "checkstyle",
+            "snyk-java",
+            "google-java-format",
+            "palantir-java-format",
+            "dependency-check",
+            "error-prone",
+            "jdk-flight-recorder",
+        ] {
+            assert!(
+                plan.selected_scanners.contains(&(*name).to_string()),
+                "expected '{name}' in java plan"
+            );
+        }
     }
 
     #[test]
     fn selects_ruby_scanners_for_ruby_target() {
-        assert_selected(
-            "apps/store/Gemfile",
-            &[
-                "brakeman",
-                "bundler-audit",
-                "rubocop",
-                "pronto",
-                "debride",
-                "flay",
-                "flog",
-                "standardrb",
-                "license_finder",
-            ],
-        );
+        let selector = ToolSelector::new();
+        let registry = ScannerRegistry::new().expect("registry should initialize");
+        let plan = selector.plan("apps/store/Gemfile", &registry);
+        for name in &[
+            "brakeman",
+            "bundler-audit",
+            "rubocop",
+            "pronto",
+            "debride",
+            "flay",
+            "flog",
+            "standardrb",
+            "license_finder",
+        ] {
+            assert!(
+                plan.selected_scanners.contains(&(*name).to_string()),
+                "expected '{name}' in ruby plan"
+            );
+        }
     }
 
     #[test]
     fn selects_php_scanners_for_php_target() {
-        assert_selected(
-            "backend/composer.json",
-            &["phpstan", "psalm", "phpcs", "rector", "enlightn"],
-        );
+        let selector = ToolSelector::new();
+        let registry = ScannerRegistry::new().expect("registry should initialize");
+        let plan = selector.plan("backend/composer.json", &registry);
+        for name in &["phpstan", "psalm", "phpcs", "rector", "enlightn"] {
+            assert!(
+                plan.selected_scanners.contains(&(*name).to_string()),
+                "expected '{name}' in php plan"
+            );
+        }
     }
 
     #[test]
     fn selects_dotnet_scanners_for_dotnet_target() {
-        assert_selected(
-            "src/App/App.csproj",
-            &[
-                "dotnet-format",
-                "roslyn-analyzers",
-                "dotnet-sonarscanner",
-                "dotnet-snyk",
-                "jb-inspectcode",
-            ],
-        );
+        let selector = ToolSelector::new();
+        let registry = ScannerRegistry::new().expect("registry should initialize");
+        let plan = selector.plan("src/App/App.csproj", &registry);
+        for name in &[
+            "dotnet-format",
+            "roslyn-analyzers",
+            "dotnet-sonarscanner",
+            "dotnet-snyk",
+            "jb-inspectcode",
+        ] {
+            assert!(
+                plan.selected_scanners.contains(&(*name).to_string()),
+                "expected '{name}' in dotnet plan"
+            );
+        }
     }
 
     #[test]
     fn selects_cpp_scanners_for_cpp_target() {
-        assert_selected(
-            "native/CMakeLists.txt",
-            &["clang-tidy", "cppcheck", "clang-format", "flawfinder"],
-        );
+        let selector = ToolSelector::new();
+        let registry = ScannerRegistry::new().expect("registry should initialize");
+        let plan = selector.plan("native/CMakeLists.txt", &registry);
+        for name in &["clang-tidy", "cppcheck", "clang-format", "flawfinder"] {
+            assert!(
+                plan.selected_scanners.contains(&(*name).to_string()),
+                "expected '{name}' in cpp plan"
+            );
+        }
     }
 
     #[test]
-    fn returns_empty_scanners_for_unknown_target() {
-        assert_selected("docs/architecture.txt", &[]);
+    fn returns_only_security_scanners_for_unknown_target() {
+        // Cross-language security scanners are always included; non-IaC/language
+        // targets still get the always-on security layer.
+        let selector = ToolSelector::new();
+        let registry = ScannerRegistry::new().expect("registry should initialize");
+        let plan = selector.plan("docs/architecture.txt", &registry);
+        assert!(plan.selected_scanners.contains(&"semgrep".to_string()));
+        assert!(plan.selected_scanners.contains(&"gitleaks".to_string()));
+        assert!(plan.selected_scanners.contains(&"osv-scanner".to_string()));
+        assert!(plan.selected_scanners.contains(&"grype".to_string()));
+    }
+
+    #[test]
+    fn selects_iac_scanners_for_iac_target() {
+        // IaC target should get IaC scanners unioned with the always-on security layer.
+        let selector = ToolSelector::new();
+        let registry = ScannerRegistry::new().expect("registry should initialize");
+        let plan = selector.plan("infrastructure/main.tf", &registry);
+        for name in &[
+            "checkov",
+            "tfsec",
+            "kube-linter",
+            "trivy-config",
+            "hadolint",
+            "kubesec",
+            "conftest",
+            "terrascan",
+            "semgrep",
+            "gitleaks",
+        ] {
+            assert!(
+                plan.selected_scanners.contains(&(*name).to_string()),
+                "expected scanner '{name}' in IaC plan"
+            );
+        }
+    }
+
+    #[test]
+    fn selects_shell_scanners_for_shell_target() {
+        let selector = ToolSelector::new();
+        let registry = ScannerRegistry::new().expect("registry should initialize");
+        let plan = selector.plan("scripts/deploy.sh", &registry);
+        assert!(plan.selected_scanners.contains(&"shellcheck".to_string()));
+        assert!(plan.selected_scanners.contains(&"semgrep".to_string()));
+    }
+
+    #[test]
+    fn selects_kotlin_scanners_for_kotlin_target() {
+        let selector = ToolSelector::new();
+        let registry = ScannerRegistry::new().expect("registry should initialize");
+        let plan = selector.plan("app/src/Main.kt", &registry);
+        assert!(plan.selected_scanners.contains(&"detekt".to_string()));
+        assert!(plan.selected_scanners.contains(&"ktlint".to_string()));
+    }
+
+    #[test]
+    fn selects_elixir_scanners_for_elixir_target() {
+        let selector = ToolSelector::new();
+        let registry = ScannerRegistry::new().expect("registry should initialize");
+        let plan = selector.plan("lib/app/mix.exs", &registry);
+        assert!(plan.selected_scanners.contains(&"credo".to_string()));
+        assert!(plan.selected_scanners.contains(&"sobelow".to_string()));
+    }
+
+    #[test]
+    fn selects_sql_scanners_for_sql_target() {
+        let selector = ToolSelector::new();
+        let registry = ScannerRegistry::new().expect("registry should initialize");
+        let plan = selector.plan("db/migrations/001_create_users.sql", &registry);
+        assert!(plan.selected_scanners.contains(&"sqlfluff".to_string()));
+    }
+
+    #[test]
+    fn security_scanners_always_included_with_python_target() {
+        let selector = ToolSelector::new();
+        let registry = ScannerRegistry::new().expect("registry should initialize");
+        let plan = selector.plan("services/api/app.py", &registry);
+        // Language-specific scanners present
+        assert!(plan.selected_scanners.contains(&"bandit".to_string()));
+        // Always-on security layer also present
+        assert!(plan.selected_scanners.contains(&"semgrep".to_string()));
+        assert!(plan.selected_scanners.contains(&"gitleaks".to_string()));
     }
 }

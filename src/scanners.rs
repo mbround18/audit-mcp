@@ -132,6 +132,140 @@ impl ScannerRegistry {
                 "Optimization",
                 &["pnpx", "bundlephobia", "{target}"],
             ),
+            node_scanner(
+                "oxlint",
+                "Extremely fast JavaScript/TypeScript linter written in Rust.",
+                "Linting",
+                &["pnpx", "oxlint", "{target}"],
+            ),
+            node_scanner(
+                "npm-audit",
+                "Audits npm dependencies for known security vulnerabilities.",
+                "Security (SCA)",
+                &["npm", "audit", "--json"],
+            ),
+            security_scanner(
+                "semgrep",
+                "Multi-language static analysis for security and code correctness.",
+                "Security (SAST)",
+                "returntocorp/semgrep:latest",
+                &[
+                    "sh",
+                    "-c",
+                    "semgrep scan --json --no-rewrite-rule-ids . || true",
+                ],
+            ),
+            security_scanner(
+                "gitleaks",
+                "Detects hardcoded secrets, credentials, and tokens in source code.",
+                "Security (Secrets)",
+                "zricethezav/gitleaks:latest",
+                &[
+                    "gitleaks",
+                    "detect",
+                    "--source",
+                    ".",
+                    "--report-format",
+                    "json",
+                    "--exit-code",
+                    "0",
+                ],
+            ),
+            security_scanner(
+                "osv-scanner",
+                "Ecosystem-agnostic dependency vulnerability scanner by Google.",
+                "Security (SCA)",
+                "ghcr.io/google/osv-scanner:latest",
+                &["sh", "-c", "osv-scanner scan --format json . || true"],
+            ),
+            security_scanner(
+                "grype",
+                "Vulnerability scanner for repositories, filesystems, and SBOMs.",
+                "Security (SCA)",
+                "anchore/grype:latest",
+                &["sh", "-c", "grype dir:. -o json || true"],
+            ),
+            security_scanner(
+                "bearer",
+                "Multi-language SAST scanner focused on security risks and data privacy.",
+                "Security (SAST)",
+                "bearer/bearer:latest",
+                &["sh", "-c", "bearer scan . --format json --quiet || true"],
+            ),
+            iac_scanner(
+                "checkov",
+                "Scans Terraform and Kubernetes configurations for policy violations.",
+                "Security (IaC)",
+                "bridgecrew/checkov:latest",
+                &["checkov", "-d", "{target}", "-o", "json", "--soft-fail"],
+            ),
+            iac_scanner(
+                "tfsec",
+                "Finds security misconfigurations in Terraform code.",
+                "Security (IaC)",
+                "aquasec/tfsec:latest",
+                &["tfsec", "{target}", "--format", "json"],
+            ),
+            iac_scanner(
+                "kube-linter",
+                "Detects Kubernetes workload misconfigurations and policy issues.",
+                "Security (Kubernetes)",
+                "stackrox/kube-linter:latest",
+                &["kube-linter", "lint", "{target}"],
+            ),
+            iac_scanner(
+                "trivy-config",
+                "Scans infrastructure and Kubernetes manifests for misconfigurations.",
+                "Security (IaC)",
+                "aquasec/trivy:latest",
+                &["trivy", "config", "{target}", "--format", "json"],
+            ),
+            iac_scanner(
+                "hadolint",
+                "Lints Dockerfiles for security and best-practice issues.",
+                "Security (Containers)",
+                "hadolint/hadolint:latest-alpine",
+                &[
+                    "sh",
+                    "-c",
+                    "find . -type f \\( -name Dockerfile -o -name 'Dockerfile.*' -o -name '*.Dockerfile' \\) -print0 | xargs -0 -r hadolint",
+                ],
+            ),
+            iac_scanner(
+                "kubesec",
+                "Security risk analysis and scoring for Kubernetes resources.",
+                "Security (Kubernetes)",
+                "kubesec/kubesec:v2",
+                &[
+                    "sh",
+                    "-c",
+                    "find . \\( -name '*.yaml' -o -name '*.yml' \\) -print0 | xargs -0 -r kubesec scan || true",
+                ],
+            ),
+            iac_scanner(
+                "conftest",
+                "Tests configuration files using Open Policy Agent Rego policies.",
+                "Security (Policy)",
+                "openpolicyagent/conftest:latest",
+                &["sh", "-c", "conftest test . --all-namespaces || true"],
+            ),
+            iac_scanner(
+                "terrascan",
+                "Static code analyser for Terraform, Kubernetes, ARM, and CloudFormation.",
+                "Security (IaC)",
+                "tenable/terrascan:latest",
+                &["sh", "-c", "terrascan scan -d . || true"],
+            ),
+            shell_scanner(
+                "shellcheck",
+                "Static analysis and best-practice linter for shell scripts.",
+                "Security (SAST)",
+                &[
+                    "sh",
+                    "-c",
+                    "find . \\( -name '*.sh' -o -name '*.bash' -o -name '*.zsh' \\) -print0 | xargs -0 -r shellcheck -f json || true",
+                ],
+            ),
             rust_scanner_with_install(
                 "cargo-audit",
                 "Audits Cargo.lock dependencies against RustSec advisories.",
@@ -201,6 +335,22 @@ impl ScannerRegistry {
                 "Dependency Mgmt",
                 &["cargo", "outdated"],
                 Some("cargo install cargo-outdated --locked"),
+            ),
+            rust_scanner_with_install(
+                "cargo-geiger",
+                "Detects usage of unsafe Rust code in a crate and all dependencies.",
+                "Security (Unsafe)",
+                &["sh", "-c", "cargo geiger --json || true"],
+                Some("cargo install cargo-geiger --locked"),
+            ),
+            rust_scanner_with_install(
+                "cargo-udeps",
+                "Finds unused crate dependencies with Rust nightly.",
+                "Code Optimization",
+                &["sh", "-c", "cargo +nightly udeps || true"],
+                Some(
+                    "rustup toolchain install nightly --profile minimal && cargo install cargo-udeps --locked",
+                ),
             ),
             go_scanner(
                 "govulncheck",
@@ -296,6 +446,18 @@ impl ScannerRegistry {
                 "Terminal-style coverage visualization utility for Go.",
                 "Test Coverage",
                 &["go", "run", "github.com/msoap/go-carpet@latest"],
+            ),
+            go_scanner(
+                "revive",
+                "Fast, configurable, extensible linter for Go.",
+                "Linting & Quality",
+                &["go", "run", "github.com/mgechev/revive@latest", "./..."],
+            ),
+            go_scanner(
+                "errcheck",
+                "Checks for unchecked errors in Go programs.",
+                "Code Reliability",
+                &["go", "run", "github.com/kisielk/errcheck@latest", "./..."],
             ),
             java_scanner(
                 "spotbugs",
@@ -511,6 +673,48 @@ impl ScannerRegistry {
                 "C/C++ SAST checks against known CWE/CVE patterns.",
                 "Security (SAST)",
                 &["pipx", "run", "flawfinder", "{target}"],
+            ),
+            kotlin_scanner_with_install(
+                "detekt",
+                "Static analysis tool for Kotlin with code smell and security checks.",
+                "Code Quality",
+                &["sh", "-c", "java -jar /tmp/detekt.jar --input . || true"],
+                Some(
+                    "curl -sSL https://github.com/detekt/detekt/releases/latest/download/detekt-cli-jvm -o /tmp/detekt.jar",
+                ),
+            ),
+            kotlin_scanner_with_install(
+                "ktlint",
+                "Kotlin linter and formatter following the official Kotlin style guide.",
+                "Linting & Formatting",
+                &[
+                    "sh",
+                    "-c",
+                    "ktlint --reporter=json '**/*.kt' '**/*.kts' || true",
+                ],
+                Some(
+                    "curl -sSL https://github.com/pinterest/ktlint/releases/latest/download/ktlint -o /usr/local/bin/ktlint && chmod +x /usr/local/bin/ktlint",
+                ),
+            ),
+            elixir_scanner_with_install(
+                "credo",
+                "Static code analysis for Elixir with code consistency and quality checks.",
+                "Code Quality",
+                &["sh", "-c", "mix credo --strict || true"],
+                Some("mix local.hex --force && mix archive.install hex credo --force"),
+            ),
+            elixir_scanner_with_install(
+                "sobelow",
+                "Security-focused static analysis for Phoenix and Elixir applications.",
+                "Security (SAST)",
+                &["sh", "-c", "mix sobelow --config || true"],
+                Some("mix local.hex --force && mix archive.install hex sobelow --force"),
+            ),
+            sql_scanner(
+                "sqlfluff",
+                "SQL linter and formatter with support for multiple SQL dialects.",
+                "Linting & Formatting",
+                &["uvx", "sqlfluff", "lint", "{target}"],
             ),
         ];
 
@@ -728,6 +932,124 @@ fn cpp_scanner(
         description: description.to_string(),
         image: "ubuntu:24.04".to_string(),
         categories: vec![category.to_string(), "c-cpp".to_string()],
+        command_template: command_template
+            .iter()
+            .map(|arg| (*arg).to_string())
+            .collect(),
+        install_script: None,
+    }
+}
+
+fn iac_scanner(
+    name: &str,
+    description: &str,
+    category: &str,
+    image: &str,
+    command_template: &[&str],
+) -> ScannerDefinition {
+    ScannerDefinition {
+        name: name.to_string(),
+        description: description.to_string(),
+        image: image.to_string(),
+        categories: vec![category.to_string(), "iac".to_string()],
+        command_template: command_template
+            .iter()
+            .map(|arg| (*arg).to_string())
+            .collect(),
+        install_script: None,
+    }
+}
+
+fn security_scanner(
+    name: &str,
+    description: &str,
+    category: &str,
+    image: &str,
+    command_template: &[&str],
+) -> ScannerDefinition {
+    ScannerDefinition {
+        name: name.to_string(),
+        description: description.to_string(),
+        image: image.to_string(),
+        categories: vec![category.to_string(), "security".to_string()],
+        command_template: command_template
+            .iter()
+            .map(|arg| (*arg).to_string())
+            .collect(),
+        install_script: None,
+    }
+}
+
+fn shell_scanner(
+    name: &str,
+    description: &str,
+    category: &str,
+    command_template: &[&str],
+) -> ScannerDefinition {
+    ScannerDefinition {
+        name: name.to_string(),
+        description: description.to_string(),
+        image: "koalaman/shellcheck-alpine:stable".to_string(),
+        categories: vec![category.to_string(), "shell".to_string()],
+        command_template: command_template
+            .iter()
+            .map(|arg| (*arg).to_string())
+            .collect(),
+        install_script: None,
+    }
+}
+
+fn kotlin_scanner_with_install(
+    name: &str,
+    description: &str,
+    category: &str,
+    command_template: &[&str],
+    install_script: Option<&str>,
+) -> ScannerDefinition {
+    ScannerDefinition {
+        name: name.to_string(),
+        description: description.to_string(),
+        image: "eclipse-temurin:21-alpine".to_string(),
+        categories: vec![category.to_string(), "kotlin".to_string()],
+        command_template: command_template
+            .iter()
+            .map(|arg| (*arg).to_string())
+            .collect(),
+        install_script: install_script.map(str::to_string),
+    }
+}
+
+fn elixir_scanner_with_install(
+    name: &str,
+    description: &str,
+    category: &str,
+    command_template: &[&str],
+    install_script: Option<&str>,
+) -> ScannerDefinition {
+    ScannerDefinition {
+        name: name.to_string(),
+        description: description.to_string(),
+        image: "elixir:1.18-slim".to_string(),
+        categories: vec![category.to_string(), "elixir".to_string()],
+        command_template: command_template
+            .iter()
+            .map(|arg| (*arg).to_string())
+            .collect(),
+        install_script: install_script.map(str::to_string),
+    }
+}
+
+fn sql_scanner(
+    name: &str,
+    description: &str,
+    category: &str,
+    command_template: &[&str],
+) -> ScannerDefinition {
+    ScannerDefinition {
+        name: name.to_string(),
+        description: description.to_string(),
+        image: "ghcr.io/astral-sh/uv:latest".to_string(),
+        categories: vec![category.to_string(), "sql".to_string()],
         command_template: command_template
             .iter()
             .map(|arg| (*arg).to_string())

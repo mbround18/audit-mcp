@@ -6,7 +6,7 @@ Point it at any directory and your AI assistant can audit it — without install
 
 ## Features
 
-- **70+ scanners** across Rust, Go, Python, Node, Java, Ruby, PHP, .NET, and C/C++
+- **95+ scanners** across Rust, Go, Python, Node, IaC/Kubernetes, Java, Ruby, PHP, .NET, C/C++, Kotlin, Elixir, SQL, and Shell — plus a cross-language security layer (semgrep, gitleaks, grype, osv-scanner) that runs on every target
 - **Fully isolated** — every scanner runs in its own ephemeral Docker container with a read-only workspace mount, `no-new-privileges`, and all Linux capabilities dropped
 - **Persistent cache** — named Docker volumes share downloaded packages and compiled artifacts across runs so repeated scans are fast
 - **MCP-native** — exposes `list_scanners`, `run_scan`, `explain_finding`, and `suggest_fixes` as structured tools any MCP client can call
@@ -16,6 +16,13 @@ Point it at any directory and your AI assistant can audit it — without install
 
 - Rust 1.88+ (build only)
 - Docker (running daemon, accessible via the default socket)
+
+## Auth-required scanners
+
+Some scanners require credentials supplied as host environment variables. `audit-mcp` only passes through an allowlisted set per scanner.
+
+- `snyk`, `snyk-java`, `dotnet-snyk`: requires `SNYK_TOKEN` (optionally passes `SNYK_API`, `SNYK_CFG_ORG`)
+- `dotnet-sonarscanner`: requires `SONAR_TOKEN` and `SONAR_HOST_URL` (optionally passes `SONAR_PROJECT_KEY`, `SONAR_ORGANIZATION`)
 
 ## Installation
 
@@ -66,17 +73,23 @@ Takes an array of normalized findings, returns minimal fix suggestions.
 
 ## Supported languages and scanners
 
-| Language | Scanners                                                                                                                                                         |
-| -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Rust     | `cargo-audit`, `cargo-clippy`, `cargo-deny`, `cargo-fmt`, `cargo-machete`, `cargo-bloat`, `cargo-tarpaulin`, `cargo-llvm-cov`, `cargo-outdated`, `cargo-mutants` |
-| Go       | `govulncheck`, `gosec`, `golangci-lint`, `staticcheck`, `goimports`, `gocyclo`, `nilaway`, `ineffassign`, `go-carpet`                                            |
-| Python   | `bandit`, `safety`, `ruff`, `black`, `mypy`, `pip-audit`, `vulture`, `flake8`, `isort`, `radon`                                                                  |
-| Node     | `knip`, `snyk`, `retire`, `auditjs`, `eslint`, `prettier`, `depcheck`, `license-checker`, `lighthouse`, `bundlephobia`                                           |
-| Java     | `spotbugs`, `pmd`, `checkstyle`, `snyk-java`, `google-java-format`, `palantir-java-format`, `dependency-check`, `error-prone`, `jdk-flight-recorder`             |
-| Ruby     | `brakeman`, `bundler-audit`, `rubocop`, `pronto`, `debride`, `flay`, `flog`, `standardrb`, `license_finder`                                                      |
-| PHP      | `phpstan`, `psalm`, `phpcs`, `rector`, `enlightn`                                                                                                                |
-| .NET     | `dotnet-format`, `roslyn-analyzers`, `dotnet-sonarscanner`, `dotnet-snyk`, `jb-inspectcode`                                                                      |
-| C/C++    | `clang-tidy`, `cppcheck`, `clang-format`, `flawfinder`                                                                                                           |
+| Language              | Scanners                                                                                                                                                                        |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Rust                  | `cargo-audit`, `cargo-clippy`, `cargo-deny`, `cargo-fmt`, `cargo-machete`, `cargo-bloat`, `cargo-tarpaulin`, `cargo-llvm-cov`, `cargo-outdated`, `cargo-mutants`, `cargo-geiger`, `cargo-udeps` |
+| Go                    | `govulncheck`, `gosec`, `golangci-lint`, `staticcheck`, `goimports`, `gocyclo`, `nilaway`, `ineffassign`, `go-carpet`, `revive`, `errcheck`                                    |
+| Python                | `bandit`, `safety`, `ruff`, `black`, `mypy`, `pip-audit`, `vulture`, `flake8`, `isort`, `radon`                                                                                 |
+| Node                  | `knip`, `snyk`, `retire`, `auditjs`, `eslint`, `prettier`, `depcheck`, `license-checker`, `lighthouse`, `bundlephobia`, `oxlint`, `npm-audit`                                  |
+| IaC/K8s               | `checkov`, `tfsec`, `kube-linter`, `trivy-config`, `hadolint`, `kubesec`, `conftest`, `terrascan`                                                                               |
+| Cross-language (always-on) | `semgrep`, `gitleaks`, `osv-scanner`, `grype`, `bearer`                                                                                                                              |
+| Java                  | `spotbugs`, `pmd`, `checkstyle`, `snyk-java`, `google-java-format`, `palantir-java-format`, `dependency-check`, `error-prone`, `jdk-flight-recorder`                          |
+| Ruby                  | `brakeman`, `bundler-audit`, `rubocop`, `pronto`, `debride`, `flay`, `flog`, `standardrb`, `license_finder`                                                                    |
+| PHP                   | `phpstan`, `psalm`, `phpcs`, `rector`, `enlightn`                                                                                                                               |
+| .NET                  | `dotnet-format`, `roslyn-analyzers`, `dotnet-sonarscanner`, `dotnet-snyk`, `jb-inspectcode`                                                                                    |
+| C/C++                 | `clang-tidy`, `cppcheck`, `clang-format`, `flawfinder`                                                                                                                          |
+| Shell                 | `shellcheck`                                                                                                                                                                    |
+| Kotlin                | `detekt`, `ktlint`                                                                                                                                                              |
+| Elixir                | `credo`, `sobelow`                                                                                                                                                              |
+| SQL                   | `sqlfluff`                                                                                                                                                                      |
 
 ## How it works
 
