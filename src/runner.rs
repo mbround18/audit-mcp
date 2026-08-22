@@ -404,15 +404,10 @@ fn image_cache_config(image: &str, scanner_name: &str) -> CacheConfig {
         }
     } else if image.contains("node") {
         CacheConfig {
-            volumes: vec![
-                "audit-npm-cache:/cache/npm".to_string(),
-                "audit-pnpm-store:/cache/pnpm".to_string(),
-            ],
-            env: vec![
-                "NPM_CONFIG_CACHE=/cache/npm".to_string(),
-                // pnpx (pnpm dlx) uses PNPM_HOME as its content-addressed store.
-                "PNPM_HOME=/cache/pnpm".to_string(),
-            ],
+            // npx (used by all node scanners) installs on demand into npm's
+            // own cache, so a single shared volume covers every scanner.
+            volumes: vec!["audit-npm-cache:/cache/npm".to_string()],
+            env: vec!["NPM_CONFIG_CACHE=/cache/npm".to_string()],
         }
     } else if image.contains("astral") || image.contains("uv") {
         CacheConfig {

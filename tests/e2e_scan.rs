@@ -69,6 +69,58 @@ async fn shellcheck_flags_unquoted_variable() {
 
 #[tokio::test]
 #[ignore]
+async fn bandit_flags_shell_true_subprocess() {
+    require_docker!();
+
+    let server = AuditMcpServer::new().expect("server should initialize");
+    let response = server
+        .run_scan(Parameters(RunScanRequest {
+            mode: Some(RunScanMode::Single),
+            scanner: Some("bandit".to_string()),
+            scanners: None,
+            target: fixture("bandit"),
+        }))
+        .await
+        .expect("run_scan should succeed");
+
+    let run = &response.0.runs[0];
+    assert!(run.error.is_none(), "unexpected error: {:?}", run.error);
+    assert!(!run.findings.is_empty());
+    let raw = run.findings[0].raw.to_string();
+    assert!(
+        raw.contains("subprocess_popen_with_shell_equals_true") || raw.contains("B602"),
+        "expected a subprocess/shell=True finding in raw output: {raw}"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn knip_flags_unused_file() {
+    require_docker!();
+
+    let server = AuditMcpServer::new().expect("server should initialize");
+    let response = server
+        .run_scan(Parameters(RunScanRequest {
+            mode: Some(RunScanMode::Single),
+            scanner: Some("knip".to_string()),
+            scanners: None,
+            target: fixture("knip"),
+        }))
+        .await
+        .expect("run_scan should succeed");
+
+    let run = &response.0.runs[0];
+    assert!(run.error.is_none(), "unexpected error: {:?}", run.error);
+    assert!(!run.findings.is_empty());
+    let raw = run.findings[0].raw.to_string();
+    assert!(
+        raw.contains("unused.js"),
+        "expected knip to flag unused.js in raw output: {raw}"
+    );
+}
+
+#[tokio::test]
+#[ignore]
 async fn hadolint_flags_unpinned_base_image() {
     require_docker!();
 

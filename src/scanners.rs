@@ -76,67 +76,67 @@ impl ScannerRegistry {
                 "knip",
                 "Finds unused files, dependencies, and exports in Node projects.",
                 "Code Optimization",
-                &["sh", "-c", "pnpx knip || true"],
+                &["sh", "-c", "npx --yes knip || true"],
             ),
             node_scanner(
                 "snyk",
                 "Scans open-source dependencies for vulnerabilities.",
                 "Security",
-                &["sh", "-c", "pnpx snyk test || true"],
+                &["sh", "-c", "npx --yes snyk test || true"],
             ),
             node_scanner(
                 "retire",
                 "Finds vulnerable JavaScript libraries in the project.",
                 "Security",
-                &["sh", "-c", "pnpx retire || true"],
+                &["sh", "-c", "npx --yes retire || true"],
             ),
             node_scanner(
                 "auditjs",
                 "Audits package manifests against OSS Index.",
                 "Security",
-                &["sh", "-c", "pnpx auditjs ossi || true"],
+                &["sh", "-c", "npx --yes auditjs ossi || true"],
             ),
             node_scanner(
                 "prettier",
                 "Formats JS/TS and related files with consistent style.",
                 "Code Formatting",
-                &["pnpx", "prettier", "--write", "{target}"],
+                &["npx", "--yes", "prettier", "--write", "{target}"],
             ),
             node_scanner(
                 "eslint",
                 "Checks JavaScript/TypeScript code quality rules.",
                 "Code Quality",
-                &["sh", "-c", "pnpx eslint {target} || true"],
+                &["sh", "-c", "npx --yes eslint {target} || true"],
             ),
             node_scanner(
                 "depcheck",
                 "Finds unused or missing npm dependencies.",
                 "Dependency Mgmt",
-                &["pnpx", "depcheck"],
+                &["npx", "--yes", "depcheck"],
             ),
             node_scanner(
                 "license-checker",
                 "Scans dependency license types for compliance.",
                 "Compliance",
-                &["pnpx", "license-checker"],
+                &["npx", "--yes", "license-checker"],
             ),
             node_scanner(
                 "lighthouse",
                 "Audits web app performance, SEO, and UX signals.",
                 "Performance",
-                &["pnpx", "lighthouse", "{target}"],
+                &["npx", "--yes", "lighthouse", "{target}"],
             ),
             node_scanner(
                 "bundlephobia",
                 "Checks bundle size impact of npm packages.",
                 "Optimization",
-                &["pnpx", "bundlephobia", "{target}"],
+                &["npx", "--yes", "bundlephobia", "{target}"],
             ),
             node_scanner(
                 "oxlint",
                 "Extremely fast JavaScript/TypeScript linter written in Rust.",
                 "Linting",
-                &["sh", "-c", "pnpx oxlint {target} || true"],
+                &["sh", "-c", "npx --yes oxlint {target} || true"],
             ),
             node_scanner(
                 "npm-audit",
@@ -775,7 +775,7 @@ fn python_scanner(
     ScannerDefinition {
         name: name.to_string(),
         description: description.to_string(),
-        image: "ghcr.io/astral-sh/uv:latest".to_string(),
+        image: "ghcr.io/astral-sh/uv:python3.12-bookworm-slim".to_string(),
         categories: vec![category.to_string(), "python".to_string()],
         command_template: command_template
             .iter()
@@ -1046,7 +1046,7 @@ fn sql_scanner(
     ScannerDefinition {
         name: name.to_string(),
         description: description.to_string(),
-        image: "ghcr.io/astral-sh/uv:latest".to_string(),
+        image: "ghcr.io/astral-sh/uv:python3.12-bookworm-slim".to_string(),
         categories: vec![category.to_string(), "sql".to_string()],
         command_template: command_template
             .iter()

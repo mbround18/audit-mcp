@@ -61,7 +61,7 @@ Cache volumes: `audit-go-mod-cache` (module downloads), `audit-go-build-cache` (
 
 ## Python
 
-Base image: `ghcr.io/astral-sh/uv:latest`
+Base image: `ghcr.io/astral-sh/uv:python3.12-bookworm-slim`
 
 | Scanner     | Category        | Description                                               |
 | ----------- | --------------- | --------------------------------------------------------- |
@@ -97,7 +97,7 @@ Base image: `node:20-alpine`
 | `oxlint`          | Linting        | Extremely fast JS/TS linter written in Rust       |
 | `npm-audit`       | Security (SCA) | Audits npm dependencies for known vulnerabilities |
 
-Cache volumes: `audit-npm-cache` (npm tarball cache), `audit-pnpm-store` (pnpm content store used by `pnpx`).
+Cache volumes: `audit-npm-cache` (npm tarball cache used by `npx --yes`).
 
 ## Cross-language Security
 
@@ -162,7 +162,7 @@ Cache volumes: `audit-hex-packages` (Hex package cache), `audit-mix-build` (Mix 
 
 ## SQL
 
-Base image: `ghcr.io/astral-sh/uv:latest`
+Base image: `ghcr.io/astral-sh/uv:python3.12-bookworm-slim`
 
 | Scanner    | Category             | Description                                         |
 | ---------- | -------------------- | --------------------------------------------------- |

@@ -33,7 +33,7 @@ Named Docker volumes:
 
 Both are content-addressed and safe to share across concurrent containers.
 
-### Python (`ghcr.io/astral-sh/uv:latest`)
+### Python (`ghcr.io/astral-sh/uv:python3.12-bookworm-slim`)
 
 | Volume           | Mount             | Env var        | Contents                                                      |
 | ---------------- | ----------------- | -------------- | ------------------------------------------------------------- |
@@ -44,10 +44,9 @@ Both are content-addressed and safe to share across concurrent containers.
 
 ### Node (`node:20-alpine`)
 
-| Volume             | Mount         | Env var            | Contents                                    |
-| ------------------ | ------------- | ------------------ | ------------------------------------------- |
-| `audit-npm-cache`  | `/cache/npm`  | `NPM_CONFIG_CACHE` | npm tarball cache (content-addressed)       |
-| `audit-pnpm-store` | `/cache/pnpm` | `PNPM_HOME`        | pnpm content-addressed store used by `pnpx` |
+| Volume            | Mount        | Env var            | Contents                              |
+| ----------------- | ------------ | ------------------ | -------------------------------------- |
+| `audit-npm-cache` | `/cache/npm` | `NPM_CONFIG_CACHE` | npm tarball cache used by `npx --yes` |
 
 ### Ruby (`ruby:3.3-slim`)
 
