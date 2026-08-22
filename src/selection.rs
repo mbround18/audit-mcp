@@ -273,7 +273,15 @@ impl ToolSelector {
             ],
         }
     }
+}
 
+impl Default for ToolSelector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ToolSelector {
     pub fn plan(&self, target: &str, registry: &ScannerRegistry) -> ToolSelectionPlan {
         let mut selected_scanners = Vec::new();
         let target_language = Self::infer_language(target);

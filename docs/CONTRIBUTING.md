@@ -23,8 +23,12 @@ cargo test
 # type-check without full compile
 cargo check
 
-# run the full test suite
+# run the full test suite (fast, no Docker/network required)
 cargo test
+
+# run the real end-to-end tests — spins up actual scanner containers,
+# needs a reachable Docker daemon and network access to pull images
+cargo test --test e2e_scan -- --ignored
 
 # lint — must pass with no warnings
 cargo clippy -- -D warnings
@@ -39,7 +43,7 @@ cargo fmt
 cargo run
 ```
 
-The CI pipeline runs `cargo clippy -- -D warnings`, `cargo fmt -- --check`, and `cargo test`. All three must pass on every pull request.
+The CI pipeline runs `cargo clippy -- -D warnings`, `cargo fmt -- --check`, and `cargo test`. All three must pass on every pull request. `tests/e2e_scan.rs` is excluded from that default run (each test is `#[ignore]`d) since it needs a live Docker daemon and network access to pull images — run it explicitly before submitting a change to `src/runner.rs` or a scanner's command template.
 
 ## Project structure
 

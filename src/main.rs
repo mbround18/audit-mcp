@@ -1,14 +1,6 @@
-mod explain;
-mod fixes;
-mod models;
-mod runner;
-mod scanners;
-mod selection;
-mod server;
-
 use anyhow::Context;
+use audit_mcp::server::AuditMcpServer;
 use rmcp::{ServiceExt, transport::stdio};
-use server::AuditMcpServer;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

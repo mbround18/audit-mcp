@@ -110,8 +110,11 @@ Cache volumes are named `audit-cargo-home`, `audit-go-mod-cache`, `audit-uv-tool
 # type-check
 cargo check
 
-# run tests
+# run tests (fast, no Docker/network required)
 cargo test
+
+# run end-to-end tests against real scanner containers (needs Docker + network)
+cargo test --test e2e_scan -- --ignored
 
 # lint
 cargo clippy -- -D warnings

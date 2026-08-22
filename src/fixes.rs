@@ -1,6 +1,6 @@
 use crate::models::{FixSuggestion, NormalizedFinding, SuggestFixesResponse};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct FixEngine;
 
 impl FixEngine {

@@ -228,7 +228,7 @@ impl ScannerRegistry {
                 &[
                     "sh",
                     "-c",
-                    "find . -type f \\( -name Dockerfile -o -name 'Dockerfile.*' -o -name '*.Dockerfile' \\) -print0 | xargs -0 -r hadolint",
+                    "find . -type f \\( -name Dockerfile -o -name 'Dockerfile.*' -o -name '*.Dockerfile' \\) -print0 | xargs -0 -r hadolint || true",
                 ],
             ),
             iac_scanner(

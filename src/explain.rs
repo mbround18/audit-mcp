@@ -134,3 +134,9 @@ impl FindingExplainer {
             })
     }
 }
+
+impl Default for FindingExplainer {
+    fn default() -> Self {
+        Self::new()
+    }
+}

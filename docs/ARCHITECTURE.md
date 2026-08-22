@@ -4,6 +4,8 @@
 
 `audit-mcp` is a single Rust binary that speaks the [Model Context Protocol](https://modelcontextprotocol.io/) over stdio. It exposes four tools to any MCP-compatible client and executes all scanner work inside ephemeral Docker containers.
 
+`src/lib.rs` re-exports every module as the `audit_mcp` library crate; `src/main.rs` is a thin binary entry point on top of it. The library target exists so `tests/e2e_scan.rs` can drive `AuditMcpServer`'s real tool methods directly instead of talking to a spawned process over stdio.
+
 ```mermaid
 flowchart TD
     SRC["src/"] --> MAIN["main.rs<br/>bootstrap: creates AuditMcpServer, serves over stdio"]
@@ -117,3 +119,12 @@ flowchart TD
 3. Add a `LanguageToolProfile` in `selection.rs`.
 4. Extend `image_cache_config` in `runner.rs` to cover the new image pattern and redirect its cache directories to named volumes.
 5. Extend `infer_language` in `selection.rs` to recognize the new file extensions and manifest names.
+
+## Testing
+
+Two layers:
+
+- **Unit tests** — `#[cfg(test)]` modules inline in `runner.rs`, `selection.rs`, and `server.rs`. No Docker required; part of the default `cargo test` run.
+- **End-to-end tests** — `tests/e2e_scan.rs`. Runs real scanner containers via `DockerScannerRunner` through the full `AuditMcpServer` tool surface (`run_scan`, `list_scanners`, `explain_finding`) against fixtures in `tests/fixtures/`. Each Docker-dependent test is `#[ignore]`d and self-skips (with a message) if no daemon is reachable, so `cargo test` alone stays fast and hermetic. Run explicitly with `cargo test --test e2e_scan -- --ignored` whenever a change touches `runner.rs`, a scanner's `command_template`, or `image_cache_config`.
+
+When adding a new e2e case, prefer a scanner with a small image and a command that already exits non-zero on findings (or wraps with `|| true`, matching the existing convention) — the tests exist to catch exactly that class of bug, where a scanner reports real findings but `run_scan` mistakes the exit code for a crash.
