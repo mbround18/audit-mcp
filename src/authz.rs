@@ -16,8 +16,31 @@ use std::collections::HashMap;
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
-use crate::http::auth::CallerIdentity;
 use crate::workspace::target::{RemoteScheme, RemoteTarget};
+
+/// Who is calling, from a token that passed every check.
+///
+/// Lives here rather than in the HTTP module so the scan path can always ask
+/// whether it has a caller, whatever transport is in use. On stdio there is
+/// none — the caller is the operator — and that absence is meaningful.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallerIdentity {
+    pub subject: String,
+    pub issuer: String,
+    pub scopes: Vec<String>,
+}
+
+/// Everything a request carries about who is making it.
+///
+/// Inserted by the HTTP layer once a token has been validated, and read back
+/// in the tool handler. Its presence is what distinguishes "a person on the
+/// hosted transport" from "the operator on stdio".
+#[derive(Debug, Clone)]
+pub struct CallerContext {
+    pub identity: CallerIdentity,
+    /// The caller's own forge credential, if they supplied one.
+    pub forge_token: Option<CallerToken>,
+}
 
 /// A caller's own forge credential, presented per request.
 ///

@@ -5,7 +5,6 @@
 //! everyone uses and the one that must not change.
 
 pub mod auth;
-pub mod authz;
 pub mod metadata;
 
 use std::sync::Arc;
@@ -19,14 +18,21 @@ use rmcp::transport::streamable_http_server::{
     StreamableHttpService, session::local::LocalSessionManager,
 };
 
+use crate::authz::{Authorizer, CallerContext, CallerToken};
 use crate::config::Config;
 use crate::http::auth::{AuthError, ResourceServer};
-use crate::http::authz::Authorizer;
 use crate::http::metadata::ProtectedResourceMetadata;
 use crate::server::AuditMcpServer;
 
 /// Where the metadata document lives, per RFC 9728.
 pub const METADATA_PATH: &str = "/.well-known/oauth-protected-resource";
+
+/// Header carrying the caller's own forge credential.
+///
+/// A header rather than a tool argument: a token in a tool argument would flow
+/// through the model's context, where it would be logged, summarized, and
+/// quite possibly repeated back.
+pub const FORGE_TOKEN_HEADER: &str = "x-audit-github-token";
 
 /// MCP payloads are small. An unbounded body is a denial-of-service vector.
 const MAX_BODY_BYTES: usize = 4 * 1024 * 1024;
@@ -79,7 +85,7 @@ pub fn router(config: &Config, state: Arc<HttpState>) -> Result<Router, String> 
 /// Reject any request to the MCP endpoint that does not carry a valid token.
 async fn require_token(
     State(state): State<Arc<HttpState>>,
-    request: axum::extract::Request,
+    mut request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
     let header = request
@@ -88,10 +94,28 @@ async fn require_token(
         .and_then(|value| value.to_str().ok())
         .map(str::to_string);
 
-    match state.resource_server.authenticate(header.as_deref()).await {
-        Ok(_identity) => next.run(request).await,
-        Err(error) => refuse(&state, error),
-    }
+    let identity = match state.resource_server.authenticate(header.as_deref()).await {
+        Ok(identity) => identity,
+        Err(error) => return refuse(&state, error),
+    };
+
+    let forge_token = request
+        .headers()
+        .get(FORGE_TOKEN_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(CallerToken::new);
+
+    // The tool handler reads this back out of the request parts rmcp forwards.
+    // Attaching it here, after validation, is what makes it impossible for a
+    // scan to run without the server knowing who asked for it.
+    request.extensions_mut().insert(CallerContext {
+        identity,
+        forge_token,
+    });
+
+    next.run(request).await
 }
 
 /// Render an authentication failure.

@@ -14,6 +14,7 @@
 //!   * `smoke_scripting_tier` — ruby/php
 //!   * `smoke_dotnet_tier`  — .NET SDK
 //!   * `smoke_elixir_tier`  — elixir/mix
+//!   * `smoke_cluster_tier` — the same contract through the Kubernetes backend
 //!
 //! A scanner "passes" when it does not come back as `tool_error`. Finding
 //! nothing is a pass; being unable to run is not.
@@ -250,4 +251,124 @@ async fn smoke_dotnet_tier() {
 #[ignore]
 async fn smoke_elixir_tier() {
     run_tier(&["credo", "sobelow"]).await;
+}
+
+/// The Kubernetes backend, held to the same contract as every other tier.
+///
+/// The backend clones the repository itself in an initContainer, so this tier
+/// needs a *repository* target rather than a fixture directory — a cluster
+/// cannot see this filesystem. It scans this project, which conveniently
+/// contains shell scripts, a Dockerfile, Terraform, and Kubernetes manifests.
+#[cfg(feature = "kubernetes")]
+mod cluster {
+    use super::*;
+    use audit_mcp::config::{KubernetesConfig, WorkspaceConfig};
+    use audit_mcp::executor::kubernetes::KubernetesExecutor;
+    use audit_mcp::executor::{Executor, WorkspaceSource};
+    use audit_mcp::redact::Redactor;
+    use audit_mcp::runner::ScanRunner;
+    use audit_mcp::workspace;
+    use std::sync::Arc;
+
+    /// The namespace this suite is allowed to create workloads in.
+    const NAMESPACE: &str = "auditor-development";
+    const REPO: &str = "https://github.com/mbround18/audit-mcp";
+
+    fn config() -> KubernetesConfig {
+        KubernetesConfig {
+            namespace: Some(NAMESPACE.to_string()),
+            ..Default::default()
+        }
+    }
+
+    async fn cluster_available() -> bool {
+        KubernetesExecutor::new(config()).is_available().await
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn smoke_cluster_tier() {
+        if !cluster_available().await {
+            eprintln!("skipping: no reachable cluster or namespace '{NAMESPACE}'");
+            return;
+        }
+
+        // Resolve the repository once; every scanner reuses the same source,
+        // and each Job clones it for itself inside the cluster.
+        let provisioned = workspace::provision(REPO, &WorkspaceConfig::default(), &Redactor::new())
+            .await
+            .expect("the repository resolves");
+        let source = provisioned.source();
+        assert!(
+            matches!(source, WorkspaceSource::Repository { .. }),
+            "the cluster backend needs a repository source"
+        );
+
+        let runner = ScanRunner::with_executor(Arc::new(KubernetesExecutor::new(config())));
+        let registry = ScannerRegistry::new().expect("registry");
+        let mut failures = Vec::new();
+
+        // A representative slice rather than the whole catalog: this runs in
+        // someone's real cluster, and the contract being checked is the
+        // backend's, not each scanner's.
+        for scanner in [
+            "shellcheck",
+            "hadolint",
+            "gitleaks",
+            "trivy-config",
+            "checkov",
+        ] {
+            let definition = registry.get(scanner).expect("scanner in catalog").clone();
+            let result = runner
+                .run_scan(
+                    &definition,
+                    &provisioned.scan_path(),
+                    &ScanOptions {
+                        timeout: Some(std::time::Duration::from_secs(420)),
+                        include_raw_logs: true,
+                        source: source.clone(),
+                        ..Default::default()
+                    },
+                )
+                .await;
+
+            println!(
+                "  {:<14} {:<10} findings={}",
+                scanner,
+                result.status.as_str(),
+                result.findings.len()
+            );
+
+            match result.status {
+                RunStatus::ToolError | RunStatus::Timeout | RunStatus::Unparsed => {
+                    if let Some(logs) = result.execution.as_ref().and_then(|e| e.logs.as_deref()) {
+                        let tail: String = logs
+                            .chars()
+                            .rev()
+                            .take(400)
+                            .collect::<Vec<_>>()
+                            .into_iter()
+                            .rev()
+                            .collect();
+                        println!("      logs(tail): {}", tail.replace('\n', " | "));
+                    }
+                    failures.push(format!("{scanner}: {}", result.status.as_str()));
+                }
+                _ => {}
+            }
+
+            // The backend must clean up after every scanner, not just the last.
+            assert_eq!(
+                result.execution.as_ref().expect("execution").backend,
+                "kubernetes"
+            );
+        }
+
+        assert!(
+            failures.is_empty(),
+            "{} scanner(s) failed on the cluster backend:\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+    }
 }

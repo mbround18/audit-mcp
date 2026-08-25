@@ -2,8 +2,9 @@ use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use futures_util::future::join_all;
 use rmcp::{
-    Json, ServerHandler,
+    Json, RoleServer, ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
+    service::RequestContext,
     tool, tool_handler, tool_router,
 };
 use schemars::JsonSchema;
@@ -11,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 
 use crate::{
+    authz::{Authorizer, CallerContext},
     config::{Config, ExecutorKind, TransportKind},
     explain::FindingExplainer,
     fixes::FixEngine,
@@ -119,6 +121,9 @@ pub struct AuditMcpServer {
     fixer: Arc<FixEngine>,
     selector: Arc<ToolSelector>,
     config: Arc<Config>,
+    /// Per-caller repository access checks. Only consulted when a request
+    /// carries an identity, which on stdio it never does.
+    authorizer: Arc<Authorizer>,
 }
 
 impl AuditMcpServer {
@@ -160,6 +165,14 @@ impl AuditMcpServer {
             explainer: Arc::new(FindingExplainer::new()),
             fixer: Arc::new(FixEngine::new()),
             selector: Arc::new(ToolSelector::new()),
+            authorizer: Arc::new(Authorizer::new(
+                config
+                    .transport
+                    .oauth
+                    .as_ref()
+                    .map(|oauth| oauth.authz_cache_ttl)
+                    .unwrap_or(std::time::Duration::from_secs(300)),
+            )),
             config: Arc::new(config),
         })
     }
@@ -230,7 +243,7 @@ impl AuditMcpServer {
                     TransportKind::Stdio => "none".to_string(),
                     TransportKind::Http => "oauth2".to_string(),
                 },
-                remote_targets_supported: self.config.transport.kind == TransportKind::Stdio,
+                remote_targets_supported: true,
             },
             workspace: WorkspaceStatus {
                 git_available,
@@ -266,6 +279,21 @@ impl AuditMcpServer {
     pub async fn run_scan(
         &self,
         Parameters(request): Parameters<RunScanRequest>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<Json<RunScanResponse>, String> {
+        // The caller is present only on the hosted transport, where the HTTP
+        // layer attaches it after validating a token. Its absence means the
+        // caller is the operator on stdio, who needs no authorizing.
+        self.run_scan_for(request, caller_context(&context)).await
+    }
+
+    /// The scan itself, separated from MCP plumbing so it can be driven
+    /// directly — by a test, or by a transport that resolves the caller
+    /// differently.
+    pub async fn run_scan_for(
+        &self,
+        request: RunScanRequest,
+        caller: Option<CallerContext>,
     ) -> Result<Json<RunScanResponse>, String> {
         // One preflight beats N identical per-scanner failures.
         if !self.runner.is_available().await {
@@ -286,27 +314,28 @@ impl AuditMcpServer {
         };
 
         // Authentication proves who is calling; it does not entitle them to
-        // whatever this server can reach. Until the caller's identity is
-        // threaded from the HTTP layer into this handler and checked against
-        // the repository (FR-031), a remote target on the hosted transport
-        // would let any authenticated caller borrow the server's credential —
-        // a confused deputy. Refuse rather than ship that.
-        if self.config.transport.kind == TransportKind::Http
-            && matches!(
-                crate::workspace::target::parse(&target_expression),
-                Ok(crate::workspace::target::TargetExpression::Remote(_))
-            )
+        // whatever this server can reach. A caller must be shown to have read
+        // access under their *own* credential before the server's touches the
+        // repository — otherwise the server is a confused deputy laundering
+        // its own access.
+        let workspace_config = match (&caller, crate::workspace::target::parse(&target_expression))
         {
-            return Err(
-                "repository targets are not yet available on the hosted HTTP transport: per-caller authorization is not wired up, and using the server's own credential on your behalf would let you read repositories you cannot. Scan a local path, or use the stdio transport."
-                    .to_string(),
-            );
-        }
+            (Some(caller), Ok(crate::workspace::target::TargetExpression::Remote(remote))) => {
+                self.authorizer
+                    .authorize(&caller.identity, &remote, caller.forge_token.as_ref())
+                    .await?;
+                // Authorized under the caller's credential, so the clone uses
+                // that credential too. The server's own is never substituted,
+                // which makes the authorization inherent rather than merely
+                // checked.
+                caller_scoped_config(&self.config.workspace, caller)
+            }
+            _ => self.config.workspace.clone(),
+        };
 
         // One workspace per scan, shared read-only by every scanner it runs.
-        let workspace = Arc::new(
-            workspace::provision(&target_expression, &self.config.workspace, &redactor).await?,
-        );
+        let workspace =
+            Arc::new(workspace::provision(&target_expression, &workspace_config, &redactor).await?);
         let scan_path = match &request.subdir {
             Some(subdir) => workspace.root().join(subdir).display().to_string(),
             None => workspace.scan_path(),
@@ -621,6 +650,52 @@ impl RunScanRequest {
     pub fn with_scanners(mut self, scanners: Vec<String>) -> Self {
         self.scanners = Some(scanners);
         self
+    }
+}
+
+/// Pull the caller out of the request, if the transport attached one.
+///
+/// The HTTP layer inserts a [`CallerContext`] into the request extensions after
+/// validating a token; rmcp forwards the whole `http::request::Parts` into the
+/// tool context, so it is reachable here. On stdio there are no parts and no
+/// caller, which is exactly right — there is nobody to authorize.
+#[cfg(feature = "http")]
+fn caller_context(context: &RequestContext<RoleServer>) -> Option<CallerContext> {
+    context
+        .extensions
+        .get::<axum::http::request::Parts>()?
+        .extensions
+        .get::<CallerContext>()
+        .cloned()
+}
+
+/// Without the HTTP transport compiled in there is no way for a request to
+/// carry an identity, so there is never a caller to authorize.
+#[cfg(not(feature = "http"))]
+fn caller_context(_context: &RequestContext<RoleServer>) -> Option<CallerContext> {
+    None
+}
+
+/// A configuration that can use only the caller's own credential.
+///
+/// Every server-held source is stripped, so there is no path by which a scan
+/// authorized for one caller could fall back to the server's broader access.
+fn caller_scoped_config(
+    base: &crate::config::WorkspaceConfig,
+    caller: &CallerContext,
+) -> crate::config::WorkspaceConfig {
+    crate::config::WorkspaceConfig {
+        credentials: crate::config::CredentialConfig {
+            github_app: None,
+            token: caller
+                .forge_token
+                .as_ref()
+                .map(|token| token.expose().to_string()),
+            ssh_private_key: None,
+            ssh_known_hosts: None,
+            use_gh_cli: false,
+        },
+        ..base.clone()
     }
 }
 

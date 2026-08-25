@@ -13,9 +13,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use audit_mcp::authz::Authorizer;
 use audit_mcp::config::{Config, OAuthConfig, TransportConfig, TransportKind};
 use audit_mcp::http::auth::ResourceServer;
-use audit_mcp::http::authz::Authorizer;
 use audit_mcp::http::metadata::ProtectedResourceMetadata;
 use audit_mcp::http::{HttpState, METADATA_PATH, router};
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
@@ -262,5 +262,216 @@ async fn an_oversized_body_is_refused() {
         response.status() == 413 || response.status() == 401,
         "an 8 MiB body should be refused, got {}",
         response.status()
+    );
+}
+
+/// Pull the JSON payload out of a response, which may be SSE-framed.
+fn payload(text: &str) -> serde_json::Value {
+    let body = text
+        .lines()
+        .find_map(|line| line.strip_prefix("data: "))
+        .unwrap_or(text);
+    serde_json::from_str(body).unwrap_or_else(|_| json!({ "raw": text }))
+}
+
+/// Open an MCP session: `initialize`, then `notifications/initialized`.
+///
+/// Skipping the handshake makes every later call fail with "expect initialize
+/// request", which looks like a refusal and would let an authorization test
+/// pass without testing anything.
+async fn open_session(address: SocketAddr, token: &str) -> String {
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("http://{address}/mcp"))
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json, text/event-stream")
+        .bearer_auth(token)
+        .json(&json!({
+            "jsonrpc": "2.0", "id": 0, "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": { "name": "audit-mcp-tests", "version": "0" }
+            }
+        }))
+        .send()
+        .await
+        .expect("initialize");
+
+    let session = response
+        .headers()
+        .get("mcp-session-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string)
+        .expect("the server issues a session id");
+    let _ = response.text().await;
+
+    client
+        .post(format!("http://{address}/mcp"))
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json, text/event-stream")
+        .header("Mcp-Session-Id", &session)
+        .bearer_auth(token)
+        .json(&json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }))
+        .send()
+        .await
+        .expect("initialized notification");
+
+    session
+}
+
+/// Call `run_scan` through the HTTP endpoint on a real session, optionally
+/// presenting a forge credential alongside the identity token.
+async fn call_run_scan(
+    address: SocketAddr,
+    token: &str,
+    forge_token: Option<&str>,
+    target: &str,
+) -> serde_json::Value {
+    let session = open_session(address, token).await;
+
+    let mut request = reqwest::Client::new()
+        .post(format!("http://{address}/mcp"))
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json, text/event-stream")
+        .header("Mcp-Session-Id", session)
+        .bearer_auth(token)
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "run_scan",
+                "arguments": { "target": target, "mode": "single", "scanner": "shellcheck" }
+            }
+        }));
+    if let Some(forge_token) = forge_token {
+        request = request.header(audit_mcp::http::FORGE_TOKEN_HEADER, forge_token);
+    }
+
+    let response = request.send().await.expect("request completes");
+    let text = response.text().await.unwrap_or_default();
+    let value = payload(&text);
+    assert!(
+        !text.contains("expect initialize"),
+        "the handshake did not take, so this test proves nothing: {text}"
+    );
+    value
+}
+
+/// The whole point of the authorization layer: a caller cannot borrow the
+/// server's reach.
+#[tokio::test]
+#[ignore]
+async fn a_repository_scan_without_a_caller_credential_is_refused() {
+    let issuer = start_issuer().await;
+    let address = start_server(&issuer).await;
+    let token = sign(json!({
+        "sub": "user-1", "iss": issuer, "aud": RESOURCE,
+        "exp": now() + 300, "scope": "audit:scan",
+    }));
+
+    // Authenticated, but presenting no credential of their own.
+    let response = call_run_scan(address, &token, None, "owner/private-repo").await;
+    let rendered = response.to_string();
+
+    assert!(
+        rendered.contains("X-Audit-Github-Token")
+            || rendered.contains("your own GitHub credential"),
+        "a repository scan must demand the caller's own credential: {rendered}"
+    );
+    // And it must not have gone anywhere near a clone.
+    assert!(
+        !rendered.contains("resolved_ref"),
+        "the scan should not have run"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_caller_credential_without_access_cannot_cause_a_scan() {
+    // SC-010: even where the server's own credential would have worked, the
+    // caller's is what decides.
+    let issuer = start_issuer().await;
+    let address = start_server(&issuer).await;
+    let token = sign(json!({
+        "sub": "user-1", "iss": issuer, "aud": RESOURCE,
+        "exp": now() + 300, "scope": "audit:scan",
+    }));
+
+    if std::net::ToSocketAddrs::to_socket_addrs(&("api.github.com", 443)).is_err() {
+        eprintln!("skipping: api.github.com is not resolvable");
+        return;
+    }
+
+    // A syntactically valid token that GitHub will not accept.
+    let response = call_run_scan(
+        address,
+        &token,
+        Some("ghp_000000000000000000000000000000000000"),
+        "octocat/Hello-World",
+    )
+    .await;
+    let rendered = response.to_string();
+
+    assert!(
+        rendered.contains("does not grant read access"),
+        "a credential without access must be refused: {rendered}"
+    );
+    // The refusal must not confirm whether the repository exists.
+    assert!(!rendered.contains("not found"));
+    assert!(!rendered.contains("does not exist"));
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_local_path_needs_no_caller_credential() {
+    // There is no repository to authorize, so the check does not apply.
+    let issuer = start_issuer().await;
+    let address = start_server(&issuer).await;
+    let token = sign(json!({
+        "sub": "user-1", "iss": issuer, "aud": RESOURCE,
+        "exp": now() + 300, "scope": "audit:scan",
+    }));
+
+    let response = call_run_scan(address, &token, None, env!("CARGO_MANIFEST_DIR")).await;
+    let rendered = response.to_string();
+    assert!(
+        !rendered.contains("X-Audit-Github-Token"),
+        "a local path must not demand a forge credential: {rendered}"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn two_callers_do_not_see_each_others_scans() {
+    // FR-024. Each response must describe only its own request.
+    let issuer = start_issuer().await;
+    let address = start_server(&issuer).await;
+
+    let one = sign(json!({
+        "sub": "user-1", "iss": issuer, "aud": RESOURCE,
+        "exp": now() + 300, "scope": "audit:scan",
+    }));
+    let two = sign(json!({
+        "sub": "user-2", "iss": issuer, "aud": RESOURCE,
+        "exp": now() + 300, "scope": "audit:scan",
+    }));
+
+    let fixture_one = format!("{}/tests/fixtures/shellcheck", env!("CARGO_MANIFEST_DIR"));
+    let fixture_two = format!("{}/tests/fixtures/knip", env!("CARGO_MANIFEST_DIR"));
+
+    let (first, second) = tokio::join!(
+        call_run_scan(address, &one, None, &fixture_one),
+        call_run_scan(address, &two, None, &fixture_two),
+    );
+
+    assert!(
+        !first.to_string().contains("fixtures/knip"),
+        "one caller's response leaked the other's target"
+    );
+    assert!(
+        !second.to_string().contains("fixtures/shellcheck"),
+        "one caller's response leaked the other's target"
     );
 }

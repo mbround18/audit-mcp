@@ -43,9 +43,10 @@ macro_rules! require_docker {
 async fn scan_one(scanner: &str, target: &str) -> Vec<NormalizedFinding> {
     let server = AuditMcpServer::new().expect("server should initialize");
     let response = server
-        .run_scan(Parameters(
+        .run_scan_for(
             RunScanRequest::new(target, RunScanMode::Single).with_scanner(scanner),
-        ))
+            None,
+        )
         .await
         .expect("run_scan should succeed");
 
@@ -160,9 +161,10 @@ async fn gitleaks_runs_clean_on_a_repository_without_secrets() {
     require_docker!();
     let server = AuditMcpServer::new().expect("server should initialize");
     let response = server
-        .run_scan(Parameters(
+        .run_scan_for(
             RunScanRequest::new(fixture("knip"), RunScanMode::Single).with_scanner("gitleaks"),
-        ))
+            None,
+        )
         .await
         .expect("run_scan should succeed");
 
@@ -186,10 +188,11 @@ async fn many_mode_runs_scanners_in_parallel_with_a_summary() {
 
     let server = AuditMcpServer::new().expect("server should initialize");
     let response = server
-        .run_scan(Parameters(
+        .run_scan_for(
             RunScanRequest::new(fixture("multi"), RunScanMode::Many)
                 .with_scanners(vec!["shellcheck".to_string(), "hadolint".to_string()]),
-        ))
+            None,
+        )
         .await
         .expect("run_scan should succeed");
 
@@ -236,7 +239,7 @@ async fn all_mode_detects_languages_from_directory_contents() {
     request.scanners = None;
 
     let response = server
-        .run_scan(Parameters(request))
+        .run_scan_for(request, None)
         .await
         .expect("run_scan should succeed");
 
@@ -260,10 +263,11 @@ async fn scan_reports_missing_target_without_crashing() {
 
     let server = AuditMcpServer::new().expect("server should initialize");
     let response = server
-        .run_scan(Parameters(
+        .run_scan_for(
             RunScanRequest::new(fixture("does-not-exist"), RunScanMode::Single)
                 .with_scanner("shellcheck"),
-        ))
+            None,
+        )
         .await
         .expect("tool call itself should succeed even though the scan fails");
 
@@ -341,14 +345,15 @@ async fn scans_a_repository_that_was_never_checked_out() {
 
     let server = AuditMcpServer::new().expect("server should initialize");
     let response = server
-        .run_scan(Parameters(
+        .run_scan_for(
             // A URL, not a path. Nothing is checked out locally.
             RunScanRequest::new(
                 "https://github.com/octocat/Hello-World",
                 RunScanMode::Single,
             )
             .with_scanner("gitleaks"),
-        ))
+            None,
+        )
         .await
         .expect("run_scan should succeed");
 

@@ -16,6 +16,7 @@ use jsonwebtoken::jwk::JwkSet;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use serde::Deserialize;
 
+use crate::authz::CallerIdentity;
 use crate::config::OAuthConfig;
 
 /// Signature algorithms we will accept.
@@ -36,14 +37,6 @@ const ALLOWED_ALGORITHMS: &[Algorithm] = &[
 
 /// How long a fetched JWKS is trusted before being refetched.
 const JWKS_TTL: Duration = Duration::from_secs(300);
-
-/// Who is calling, from a token that passed every check.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CallerIdentity {
-    pub subject: String,
-    pub issuer: String,
-    pub scopes: Vec<String>,
-}
 
 /// Why a request was refused.
 ///

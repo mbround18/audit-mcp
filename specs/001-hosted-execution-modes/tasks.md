@@ -138,7 +138,7 @@ assert an identical normalized finding.
 ### Tests for User Story 2 ⚠️
 
 - [X] T043 [P] [US2] Write `tests/executor_parity.rs` (`#[ignore]`, self-skipping without a cluster): run the same scanner and fixture through both backends and assert equivalent normalized findings — same rule IDs, severities, and repository-relative paths (SC-003)
-- [ ] T044 [P] [US2] Add a cluster tier to `tests/scanner_smoke.rs` that runs the structured scanners through the Kubernetes backend and applies the same "did not come back as tool_error, timeout, or unparsed" contract
+- [X] T044 [P] [US2] Add a cluster tier to `tests/scanner_smoke.rs` that runs the structured scanners through the Kubernetes backend and applies the same "did not come back as tool_error, timeout, or unparsed" contract
 - [X] T045 [P] [US2] Add a preflight test in `tests/executor_parity.rs` asserting that with no reachable cluster a scan returns exactly one error, not one per selected scanner (FR-016)
 
 ### Implementation for User Story 2
@@ -181,9 +181,9 @@ starting T071.
 - [X] T060 [P] [US3] Write `tests/http_auth.rs` (`#[ignore]`): unauthenticated request returns 401 with a `WWW-Authenticate` challenge naming the resource metadata URL
 - [X] T061 [P] [US3] Add rejection cases to `tests/http_auth.rs`: malformed token, expired token, wrong issuer, and `alg: none` — each a 401 with no indication of which check failed
 - [X] T062 [P] [US3] Add the audience test to `tests/http_auth.rs`: a valid token minted by the same issuer for a **different** resource must be rejected (SC-006). This is the defect a hand-rolled resource server most often ships
-- [ ] T063 [P] [US3] Add an authorization test to `tests/http_auth.rs` asserting that a caller who cannot read a private repository cannot cause the server to scan it, even when a server-held credential would have granted access (SC-010)
+- [X] T063 [P] [US3] Add an authorization test to `tests/http_auth.rs` asserting that a caller who cannot read a private repository cannot cause the server to scan it, even when a server-held credential would have granted access (SC-010)
 - [ ] T064 [P] [US3] Add a metrics leakage test to `tests/secret_hygiene.rs` asserting no label value scraped after a scan contains a repository name, target URL, caller subject, or file path (SC-012)
-- [ ] T065 [P] [US3] Add an isolation test to `tests/http_auth.rs`: two identities scanning concurrently, neither response containing the other's target, findings, or workspace (FR-024)
+- [X] T065 [P] [US3] Add an isolation test to `tests/http_auth.rs`: two identities scanning concurrently, neither response containing the other's target, findings, or workspace (FR-024)
 
 ### Implementation for User Story 3
 
@@ -195,7 +195,7 @@ starting T071.
 - [X] T071 [US3] Implement per-caller repository authorization in `src/http/authz.rs`: confirm the calling identity can itself read the target before any server-held credential touches it (FR-031, FR-032)
 - [X] T072 [US3] Implement the authorization decision cache in `src/http/authz.rs`, keyed by caller and repository with a bounded lifetime so revoked access stops working promptly (FR-034)
 - [X] T073 [US3] Refuse unauthorized targets in `src/http/authz.rs` without disclosing whether the repository exists (FR-033)
-- [ ] T074 [US3] Scope every scan to its caller in `src/http/mod.rs`: workspace, credentials, findings, and in-flight state keyed by caller identity, so no request can observe or reuse another caller's scan context (FR-024)
+- [X] T074 [US3] Scope every scan to its caller in `src/http/mod.rs`: workspace, credentials, findings, and in-flight state keyed by caller identity, so no request can observe or reuse another caller's scan context (FR-024)
 - [ ] T075 [P] [US3] Implement per-caller concurrency limits in `src/http/mod.rs`, returning 429 with `Retry-After` and leaving other callers unaffected (FR-025)
 - [ ] T076 [P] [US3] Bind a session to the identity that created it in `src/http/mod.rs`, and let an in-flight scan finish when its token expires while requiring a valid token for any new request
 - [ ] T077 [P] [US3] Emit the Scan Record as a structured log line from `src/observe.rs` — caller, target, resolved ref, scanners, outcome, timing — including authorization refusals (FR-026, FR-035). Nothing is persisted

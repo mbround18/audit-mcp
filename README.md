@@ -215,11 +215,27 @@ Server: RFC 9728 metadata at `/.well-known/oauth-protected-resource`, a
 including **audience** — a token minted by the same issuer for another service
 is rejected. There is no unauthenticated HTTP mode.
 
-> **Preview limitation.** Repository targets are refused on this transport.
-> Per-caller authorization isn't wired up yet, and using the server's own
-> credential on a caller's behalf would let them read repositories they can't.
-> Local paths work; stdio is unaffected. `audit_status` reports
-> `remote_targets_supported: false`.
+**Authentication is not authorization.** A token proves who you are; it does
+not entitle you to everything this server can reach. To scan a repository on
+this transport you also supply your *own* GitHub credential — a GitHub App
+installation token or a PAT — in the `X-Audit-Github-Token` header:
+
+```bash
+curl -X POST https://audit.example.com/mcp \
+  -H "Authorization: Bearer $OIDC_TOKEN" \
+  -H "X-Audit-Github-Token: $GITHUB_TOKEN" \
+  ...
+```
+
+The server confirms *that* credential can read the repository before anything
+is cloned, and then clones with it — so what you can scan is exactly what you
+could already read. A server-held credential is never substituted on your
+behalf, which is what stops this server becoming a confused deputy. A refusal
+never reveals whether the repository exists.
+
+A header rather than a tool argument, deliberately: a token in a tool argument
+would flow through the model's context, where it would be logged, summarized,
+and quite possibly repeated back. Local paths need no forge credential.
 
 Full configuration reference:
 [`specs/001-hosted-execution-modes/contracts/configuration.md`](specs/001-hosted-execution-modes/contracts/configuration.md).
