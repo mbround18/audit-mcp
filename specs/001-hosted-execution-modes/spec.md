@@ -278,7 +278,11 @@ resource succeeds.
   when that scanner failed or timed out.
 - **FR-006**: The system MUST bound clone size, depth, and duration, and MUST
   report a `tool_error` naming the exceeded budget rather than exhausting the
-  host.
+  host. Size is bounded git-natively where the remote supports it — a partial
+  clone that refuses oversized blobs — with a coarse periodic check of the
+  working tree as a backstop for remotes that do not. The backstop is sampled,
+  not continuous, so the budget is a ceiling that may be overshot by one sample
+  interval rather than a byte-exact limit.
 - **FR-007**: Findings from a cloned workspace MUST carry repository-relative
   paths. No temporary directory or container mount prefix may appear in a
   finding location.

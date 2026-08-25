@@ -28,12 +28,16 @@ logic.
 
 **Language/Version**: Rust 2024 edition, stable toolchain (currently 1.98)
 
-**Primary Dependencies**: existing — `rmcp` 1.7 (`transport-streamable-http-server`
-feature to be added), `bollard`, `tokio`, `serde`. New — `kube` + `k8s-openapi`
-(Kubernetes backend), `axum` (HTTP surface around rmcp's tower service),
-`jsonwebtoken` (JWT validation and GitHub App JWT signing), `reqwest` (JWKS
-and GitHub App token exchange), `tempfile` (workspace lifetimes), plus a
-metrics exporter for the Prometheus endpoint. Runtime — the `git` binary.
+**Primary Dependencies**: existing — `bollard`, `tokio`, `serde`, `rmcp` 1.7.
+Always-on additions — `reqwest` (JWKS and GitHub App token exchange) and
+`tempfile` (workspace lifetimes). Behind an **off-by-default** `kubernetes`
+feature — `kube` + `k8s-openapi`. Behind an **off-by-default** `http` feature —
+`axum`, `jsonwebtoken`, a Prometheus exporter, and `rmcp`'s
+`transport-streamable-http-server`. Runtime — the `git` binary.
+
+Feature-gating is the cheapest structural defence for SC-001: a default build
+gains no new dependency, so the deployment nearly everyone runs cannot regress
+through a dependency it never compiles.
 
 **Storage**: None. The server persists nothing: temporary clone directories
 carry an explicit cleanup obligation, and scan audit records are emitted as
@@ -148,6 +152,7 @@ src/
 │   ├── docker.rs            # today's runner.rs container lifecycle
 │   └── kubernetes.rs        # Job lifecycle
 ├── runner.rs                # retains normalization, status, timeout policy
+├── config.rs                # NEW — configuration + startup validation
 ├── redact.rs                # NEW — secret redaction at the response boundary
 ├── observe.rs               # NEW — structured logs + Prometheus metrics
 └── http/                    # NEW — P3
@@ -177,8 +182,8 @@ the strongest signal the seam is drawn in the right place.
 
 | Phase | Story | Delivers | Gate to proceed |
 |-------|-------|----------|-----------------|
-| A | — | `Executor` trait extracted; Docker backend behind it; no behaviour change | Full existing suite green, including both smoke tiers |
-| B | US1 (P1) | Clone from URL, all four credential sources, cleanup, redaction | SC-002, SC-004, SC-005 |
+| A | — | `Executor` trait extracted; Docker backend behind it; configuration, logging, and the redaction mechanism in place; no behaviour change | Full existing suite green, including all six smoke tiers |
+| B | US1 (P1) | Clone from URL, all four credential sources, cleanup, credential seeding into redaction | SC-002, SC-004, SC-005 |
 | C | US2 (P2) | Kubernetes Job backend | SC-003 parity, SC-007 |
 | D | US3 (P3) | HTTP transport, resource server, per-caller authorization, metrics | SC-001 unchanged default, SC-006, SC-010, SC-011, SC-012 |
 

@@ -4,11 +4,16 @@ Every variable below is **optional**. With none of them set, `audit-mcp`
 behaves exactly as it does today: stdio transport, Docker backend, local paths
 only, no authentication (SC-001).
 
+The Kubernetes backend and the HTTP transport are behind Cargo features that
+are **off by default**, so a default build carries none of their dependencies.
+Selecting one without the matching feature is rejected at startup with a
+message naming the feature to rebuild with — not a confusing "unknown backend".
+
 ## Execution backend
 
 | Variable | Values | Default | Effect |
 |----------|--------|---------|--------|
-| `AUDIT_EXECUTOR` | `docker`, `kubernetes` | `docker` | Which backend runs scanners |
+| `AUDIT_EXECUTOR` | `docker`, `kubernetes` | `docker` | Which backend runs scanners. `kubernetes` requires a build with `--features kubernetes`. |
 | `AUDIT_MAX_PARALLEL` | integer | `4` | Concurrent executions (already effective via `run_scan`) |
 
 ### Kubernetes backend
@@ -32,8 +37,8 @@ variable selects between them.
 
 | Variable | Default | Effect |
 |----------|---------|--------|
-| `AUDIT_ALLOW_REMOTE_TARGETS` | `true` when any credential source is configured, else `true` for public HTTPS | Master switch for cloning |
-| `AUDIT_CLONE_MAX_BYTES` | `2GiB` | Clone size budget |
+| `AUDIT_ALLOW_REMOTE_TARGETS` | `true` | Master switch for cloning. Set `false` to refuse every remote target and accept local paths only — the correct setting for a deployment that should never fetch code it was not handed. |
+| `AUDIT_CLONE_MAX_BYTES` | `2GiB` | Clone size budget. Enforced git-natively where the remote supports partial clone, otherwise by a sampled check of the working tree — a ceiling that may overshoot by one sample interval, not a byte-exact limit. |
 | `AUDIT_CLONE_DEPTH` | `1` | Shallow by default |
 | `AUDIT_CLONE_TIMEOUT_SECS` | `300` | Clone wall-clock budget |
 | `AUDIT_ALLOW_PRIVATE_ADDRESSES` | `false` | Permit targets resolving to private/loopback/link-local addresses. Only for self-hosted git on an internal network; it disables an SSRF control (FR-008). |
@@ -57,7 +62,7 @@ falling through to anonymous would turn a misconfiguration into a confusing
 
 | Variable | Default | Effect |
 |----------|---------|--------|
-| `AUDIT_TRANSPORT` | `stdio` | `stdio` or `http` |
+| `AUDIT_TRANSPORT` | `stdio` | `stdio` or `http`. `http` requires a build with `--features http`. |
 | `AUDIT_HTTP_BIND` | `127.0.0.1:8080` | Listen address. Loopback by default — binding publicly must be a deliberate act. |
 | `AUDIT_RESOURCE_URL` | — | This server's canonical resource identifier. **Required** when `AUDIT_TRANSPORT=http`; token audience is validated against it. |
 

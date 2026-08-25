@@ -39,8 +39,8 @@ default build produces.
 - [ ] T002 Add feature-gated dependencies to `Cargo.toml`: `kube`/`k8s-openapi` under `kubernetes`; `axum`, `jsonwebtoken`, and a Prometheus exporter under `http`; `reqwest` and `tempfile` for the always-on clone path; enable `rmcp`'s `transport-streamable-http-server` under `http`
 - [ ] T003 [P] Create module skeletons with doc comments and no logic: `src/workspace/mod.rs`, `src/executor/mod.rs`, `src/config.rs`, `src/redact.rs`, `src/observe.rs`; register them in `src/lib.rs`
 - [ ] T004 [P] Add the new test binaries as empty, self-skipping stubs so CI wiring lands before the code: `tests/workspace_clone.rs`, `tests/executor_parity.rs`, `tests/secret_hygiene.rs`, `tests/http_auth.rs`
-- [ ] T005 [P] Extend `.github/` CI to run `cargo build --all-features` and `cargo clippy --all-features -- -D warnings`, so a feature-gated module cannot rot unnoticed
-- [ ] T006 Verify `cargo build`, `cargo test`, `cargo clippy -- -D warnings`, and `cargo fmt --check` all pass with default features unchanged
+- [ ] T005 [P] Create `.github/workflows/ci.yml` running `cargo test`, `cargo clippy -- -D warnings`, `cargo fmt --check`, and additionally `cargo build --all-features` and `cargo clippy --all-features -- -D warnings`, so a feature-gated module cannot rot unnoticed. The repository has no workflow today
+- [ ] T006 Verify `cargo build`, `cargo test`, `cargo clippy -- -D warnings`, and `cargo fmt --check` all pass with default features unchanged, and that the new test binaries **self-skip** rather than fail with no Docker, cluster, or network present (SC-009)
 
 ---
 
@@ -109,7 +109,7 @@ confirm the temporary directory is gone.
 - [ ] T029 [P] [US1] Implement the `CredentialSource` enum in `src/workspace/credentials.rs` for GitHub App, token, SSH key, and anonymous, with a `name()` for reporting and secrets that cannot be printed
 - [ ] T030 [US1] Implement GitHub App authentication in `src/workspace/credentials.rs`: sign an RS256 JWT with ≤10 minute expiry, exchange it for an installation token, and fetch it immediately before the clone rather than caching it across a scan (R6)
 - [ ] T031 [US1] Implement cloning in `src/workspace/clone.rs` by invoking `git`: shallow by default, ref resolution, and credential delivery that never embeds a secret in a URL or a git remote (FR-028)
-- [ ] T032 [US1] Enforce clone bounds in `src/workspace/clone.rs` — size, depth, and duration — reporting a `tool_error` that names the exceeded budget (FR-006)
+- [ ] T032 [US1] Enforce clone bounds in `src/workspace/clone.rs` — depth, duration, and size — reporting a `tool_error` that names the exceeded budget (FR-006). Bound size git-natively where the remote supports partial clone, so oversized blobs are refused at the remote rather than after landing; back it up with a coarse sampled check of the working tree, reusing the bounded directory walk from `src/selection.rs`. Sampling makes the budget a ceiling that may overshoot by one interval, which is the right trade for a runaway-clone guard
 - [ ] T033 [US1] Implement `Workspace` provisioning and release in `src/workspace/mod.rs`: one workspace per scan shared read-only by all scanners, refcounted release so a straggler or timed-out scanner cannot lose the tree underneath it (FR-005a)
 - [ ] T034 [US1] Implement cleanup and orphan reaping in `src/workspace/mod.rs`: remove on success, failure, and timeout, and reap workspaces left behind by an unclean shutdown (FR-005)
 - [ ] T035 [US1] Implement symlink containment in `src/workspace/mod.rs` so a link inside a clone cannot expose paths outside it to a scanner (FR-009)
@@ -145,17 +145,18 @@ assert an identical normalized finding.
 
 - [ ] T046 [US2] Confirm the `kube` API surface assumed in research.md R4 (`Api::<Job>::namespaced`, completion watching, log retrieval) before building on it — research.md flags this as unverified
 - [ ] T047 [US2] Implement lazy cluster connection in `src/executor/kubernetes.rs` using in-cluster ServiceAccount with kubeconfig fallback, not caching failures, mirroring the Docker client's behaviour (constitution V)
-- [ ] T048 [US2] Build the Job spec in `src/executor/kubernetes.rs`: one `batch/v1` Job per scanner run, with `backoffLimit` and `ttlSecondsAfterFinished` as a cleanup backstop
-- [ ] T049 [US2] Add the git-clone initContainer and `emptyDir` in `src/executor/kubernetes.rs`, mounted **read-only** by the scanner container — no host path, no Docker socket (FR-012)
-- [ ] T050 [US2] Apply the isolation guarantees in `src/executor/kubernetes.rs`: read-only mount, no privilege escalation, dropped capabilities with only `DAC_READ_SEARCH` restored, memory limit, and wall-clock timeout (FR-013)
-- [ ] T051 [US2] Apply operator settings in `src/executor/kubernetes.rs` verbatim: namespace, service account, resource requests/limits, node selector, tolerations, image pull secrets (FR-014)
-- [ ] T052 [US2] Implement log collection in `src/executor/kubernetes.rs` — and **check whether pod logs interleave stdout and stderr** the way Docker's do. Interleaving corrupted gosec's SARIF in the Docker path; if the cluster merges them, affected scanners need their stderr redirected in the command instead (research.md open question)
-- [ ] T053 [US2] Implement timeout handling in `src/executor/kubernetes.rs`: delete the Job, collect partial logs first so work done is still visible, and return `Termination::TimedOut`
-- [ ] T054 [US2] Map infrastructure failures in `src/executor/kubernetes.rs` — eviction, OOM kill, unschedulable, image pull failure — to `Termination::Infrastructure(reason)` carrying the cluster's own words, so they surface as `tool_error` and never as `clean` (FR-018)
-- [ ] T055 [US2] Implement Job deletion on every exit path plus reaping of Jobs orphaned by a controller restart, in `src/executor/kubernetes.rs` (FR-015)
-- [ ] T056 [US2] Deliver credentials to the clone initContainer from a Kubernetes Secret in `src/executor/kubernetes.rs`, never as Job spec environment variables — a Job spec is readable by anyone with `get jobs` in the namespace (FR-029, R7)
-- [ ] T057 [US2] Report the backend in `ScanExecution` in `src/models.rs` and select it from configuration in `src/server.rs`
-- [ ] T058 [US2] Accept a cold scanner cache in the cluster for this release, documenting the limitation in `docs/CACHE.md` and recording the persistent-cache question as follow-up in `specs/001-hosted-execution-modes/research.md` — correctness before cache optimisation (R9)
+- [ ] T048 [US2] Extend the single-preflight check in `src/server.rs` to ask the active executor for reachability, so an unreachable cluster yields one error naming the backend rather than one failure per selected scanner (FR-016)
+- [ ] T049 [US2] Build the Job spec in `src/executor/kubernetes.rs`: one `batch/v1` Job per scanner run, with `backoffLimit` and `ttlSecondsAfterFinished` as a cleanup backstop
+- [ ] T050 [US2] Add the git-clone initContainer and `emptyDir` in `src/executor/kubernetes.rs`, mounted **read-only** by the scanner container — no host path, no Docker socket (FR-012). Pin the clone image to an exact tag, never `:latest`: an unpinned reference that drifts or 404s is the same failure class as the unpinned detekt download that once delivered an HTML error page as a jar
+- [ ] T051 [US2] Apply the isolation guarantees in `src/executor/kubernetes.rs`: read-only mount, no privilege escalation, **all** capabilities dropped, memory limit, and wall-clock timeout (FR-013). Do not carry over the Docker path's `DAC_READ_SEARCH` grant — it exists to read host directories a bind mount exposes with foreign ownership, and an `emptyDir` written by our own initContainer has uniform ownership we control, so the grant would buy nothing (constitution III). If T053 turns up a concrete case, add it deliberately with a recorded reason
+- [ ] T052 [US2] Apply operator settings in `src/executor/kubernetes.rs` verbatim: namespace, service account, resource requests/limits, node selector, tolerations, image pull secrets (FR-014)
+- [ ] T053 [US2] Implement log collection in `src/executor/kubernetes.rs` — and **check whether pod logs interleave stdout and stderr** the way Docker's do. Interleaving corrupted gosec's SARIF in the Docker path; if the cluster merges them, affected scanners need their stderr redirected in the command instead (research.md open question)
+- [ ] T054 [US2] Implement timeout handling in `src/executor/kubernetes.rs`: delete the Job, collect partial logs first so work done is still visible, and return `Termination::TimedOut`
+- [ ] T055 [US2] Map infrastructure failures in `src/executor/kubernetes.rs` — eviction, OOM kill, unschedulable, image pull failure — to `Termination::Infrastructure(reason)` carrying the cluster's own words, so they surface as `tool_error` and never as `clean` (FR-018)
+- [ ] T056 [US2] Implement Job deletion on every exit path plus reaping of Jobs orphaned by a controller restart, in `src/executor/kubernetes.rs` (FR-015)
+- [ ] T057 [US2] Deliver credentials to the clone initContainer from a Kubernetes Secret in `src/executor/kubernetes.rs`, never as Job spec environment variables — a Job spec is readable by anyone with `get jobs` in the namespace (FR-029, R7)
+- [ ] T058 [US2] Report the backend in `ScanExecution` in `src/models.rs` and select it from configuration in `src/server.rs`
+- [ ] T059 [US2] Accept a cold scanner cache in the cluster for this release, documenting the limitation in `docs/CACHE.md` and recording the persistent-cache question as follow-up in `specs/001-hosted-execution-modes/research.md` — correctness before cache optimisation (R9)
 
 **Checkpoint**: US1 and US2 both work independently. `audit-mcp` can now run in
 a cluster with no Docker socket.
@@ -173,37 +174,38 @@ resource succeeds.
 
 **⚠️ Blocked on an open question**: how a caller-scoped forge credential reaches
 the authorization check under a JWT-only IdP (research.md R10). Resolve before
-starting T070.
+starting T071.
 
 ### Tests for User Story 3 ⚠️
 
-- [ ] T059 [P] [US3] Write `tests/http_auth.rs` (`#[ignore]`): unauthenticated request returns 401 with a `WWW-Authenticate` challenge naming the resource metadata URL
-- [ ] T060 [P] [US3] Add rejection cases to `tests/http_auth.rs`: malformed token, expired token, wrong issuer, and `alg: none` — each a 401 with no indication of which check failed
-- [ ] T061 [P] [US3] Add the audience test to `tests/http_auth.rs`: a valid token minted by the same issuer for a **different** resource must be rejected (SC-006). This is the defect a hand-rolled resource server most often ships
-- [ ] T062 [P] [US3] Add an authorization test to `tests/http_auth.rs` asserting that a caller who cannot read a private repository cannot cause the server to scan it, even when a server-held credential would have granted access (SC-010)
-- [ ] T063 [P] [US3] Add a metrics leakage test to `tests/secret_hygiene.rs` asserting no label value scraped after a scan contains a repository name, target URL, caller subject, or file path (SC-012)
-- [ ] T064 [P] [US3] Add an isolation test to `tests/http_auth.rs`: two identities scanning concurrently, neither response containing the other's target, findings, or workspace (FR-024)
+- [ ] T060 [P] [US3] Write `tests/http_auth.rs` (`#[ignore]`): unauthenticated request returns 401 with a `WWW-Authenticate` challenge naming the resource metadata URL
+- [ ] T061 [P] [US3] Add rejection cases to `tests/http_auth.rs`: malformed token, expired token, wrong issuer, and `alg: none` — each a 401 with no indication of which check failed
+- [ ] T062 [P] [US3] Add the audience test to `tests/http_auth.rs`: a valid token minted by the same issuer for a **different** resource must be rejected (SC-006). This is the defect a hand-rolled resource server most often ships
+- [ ] T063 [P] [US3] Add an authorization test to `tests/http_auth.rs` asserting that a caller who cannot read a private repository cannot cause the server to scan it, even when a server-held credential would have granted access (SC-010)
+- [ ] T064 [P] [US3] Add a metrics leakage test to `tests/secret_hygiene.rs` asserting no label value scraped after a scan contains a repository name, target URL, caller subject, or file path (SC-012)
+- [ ] T065 [P] [US3] Add an isolation test to `tests/http_auth.rs`: two identities scanning concurrently, neither response containing the other's target, findings, or workspace (FR-024)
 
 ### Implementation for User Story 3
 
-- [ ] T065 [US3] Build the axum application in `src/http/mod.rs`, mounting `rmcp`'s `StreamableHttpService` as a tower service at `/mcp` (verified available in research.md R1)
-- [ ] T066 [P] [US3] Serve the RFC 9728 protected resource metadata document at `/.well-known/oauth-protected-resource` from `src/http/metadata.rs`, unauthenticated
-- [ ] T067 [US3] Implement the authentication layer in `src/http/auth.rs`: `WWW-Authenticate` challenge on unauthenticated requests, JWKS fetch with a bounded cache and key rotation handling, and an algorithm allowlist that rejects `alg: none`
-- [ ] T068 [US3] Implement full token validation in `src/http/auth.rs` — `iss`, `exp`, `nbf`, signature — and **audience against `AUDIT_RESOURCE_URL`**, which is not optional and not a formality (FR-022)
-- [ ] T069 [US3] Implement scope checking in `src/http/auth.rs`, returning 403 rather than 401 when a valid token lacks the required scope
-- [ ] T070 [US3] Implement per-caller repository authorization in `src/http/authz.rs`: confirm the calling identity can itself read the target before any server-held credential touches it (FR-031, FR-032)
-- [ ] T071 [US3] Implement the authorization decision cache in `src/http/authz.rs`, keyed by caller and repository with a bounded lifetime so revoked access stops working promptly (FR-034)
-- [ ] T072 [US3] Refuse unauthorized targets in `src/http/authz.rs` without disclosing whether the repository exists (FR-033)
-- [ ] T073 [P] [US3] Implement per-caller concurrency limits in `src/http/mod.rs`, returning 429 with `Retry-After` and leaving other callers unaffected (FR-025)
-- [ ] T074 [P] [US3] Bind a session to the identity that created it in `src/http/mod.rs`, and let an in-flight scan finish when its token expires while requiring a valid token for any new request
-- [ ] T075 [P] [US3] Emit the Scan Record as a structured log line from `src/observe.rs` — caller, target, resolved ref, scanners, outcome, timing — including authorization refusals (FR-026, FR-035). Nothing is persisted
-- [ ] T076 [US3] Implement Prometheus metrics in `src/observe.rs`: scans by terminal status, scan and per-scanner durations, backend reachability, in-flight executions and queue depth, per-caller rejections (FR-037)
-- [ ] T077 [US3] Enforce the metric label allowlist in `src/observe.rs` so repository names, target URLs, caller subjects, and paths can never become label values (FR-038)
-- [ ] T078 [P] [US3] Serve `/metrics` from `src/http/mod.rs` with no MCP token required and a separate bind address, so an operator can expose it only to scrape infrastructure (FR-039)
-- [ ] T079 [P] [US3] Add `/healthz` and `/readyz` to `src/http/mod.rs`, distinguishing alive from ready — an unreachable backend is not a reason to be killed
-- [ ] T080 [US3] Add transport selection to `src/main.rs`, defaulting to stdio with no listener and no authentication (FR-019, SC-001)
-- [ ] T081 [P] [US3] Add request body size limits and origin validation in `src/http/mod.rs` to bound denial-of-service and prevent DNS rebinding against a loopback-bound server
-- [ ] T082 [P] [US3] Extend `audit_status` in `src/server.rs` with the transport kind and authentication mode per contracts/mcp-tools.md
+- [ ] T066 [US3] Build the axum application in `src/http/mod.rs`, mounting `rmcp`'s `StreamableHttpService` as a tower service at `/mcp` (verified available in research.md R1)
+- [ ] T067 [P] [US3] Serve the RFC 9728 protected resource metadata document at `/.well-known/oauth-protected-resource` from `src/http/metadata.rs`, unauthenticated
+- [ ] T068 [US3] Implement the authentication layer in `src/http/auth.rs`: `WWW-Authenticate` challenge on unauthenticated requests, JWKS fetch with a bounded cache and key rotation handling, and an algorithm allowlist that rejects `alg: none`
+- [ ] T069 [US3] Implement full token validation in `src/http/auth.rs` — `iss`, `exp`, `nbf`, signature — and **audience against `AUDIT_RESOURCE_URL`**, which is not optional and not a formality (FR-022)
+- [ ] T070 [US3] Implement scope checking in `src/http/auth.rs`, returning 403 rather than 401 when a valid token lacks the required scope
+- [ ] T071 [US3] Implement per-caller repository authorization in `src/http/authz.rs`: confirm the calling identity can itself read the target before any server-held credential touches it (FR-031, FR-032)
+- [ ] T072 [US3] Implement the authorization decision cache in `src/http/authz.rs`, keyed by caller and repository with a bounded lifetime so revoked access stops working promptly (FR-034)
+- [ ] T073 [US3] Refuse unauthorized targets in `src/http/authz.rs` without disclosing whether the repository exists (FR-033)
+- [ ] T074 [US3] Scope every scan to its caller in `src/http/mod.rs`: workspace, credentials, findings, and in-flight state keyed by caller identity, so no request can observe or reuse another caller's scan context (FR-024)
+- [ ] T075 [P] [US3] Implement per-caller concurrency limits in `src/http/mod.rs`, returning 429 with `Retry-After` and leaving other callers unaffected (FR-025)
+- [ ] T076 [P] [US3] Bind a session to the identity that created it in `src/http/mod.rs`, and let an in-flight scan finish when its token expires while requiring a valid token for any new request
+- [ ] T077 [P] [US3] Emit the Scan Record as a structured log line from `src/observe.rs` — caller, target, resolved ref, scanners, outcome, timing — including authorization refusals (FR-026, FR-035). Nothing is persisted
+- [ ] T078 [US3] Implement Prometheus metrics in `src/observe.rs`: scans by terminal status, scan and per-scanner durations, backend reachability, in-flight executions and queue depth, per-caller rejections (FR-037)
+- [ ] T079 [US3] Enforce the metric label allowlist in `src/observe.rs` so repository names, target URLs, caller subjects, and paths can never become label values (FR-038)
+- [ ] T080 [P] [US3] Serve `/metrics` from `src/http/mod.rs` with no MCP token required and a separate bind address, so an operator can expose it only to scrape infrastructure (FR-039)
+- [ ] T081 [P] [US3] Add `/healthz` and `/readyz` to `src/http/mod.rs`, distinguishing alive from ready — an unreachable backend is not a reason to be killed
+- [ ] T082 [US3] Add transport selection to `src/main.rs`, defaulting to stdio with no listener and no authentication (FR-019, SC-001)
+- [ ] T083 [P] [US3] Add request body size limits and origin validation in `src/http/mod.rs` to bound denial-of-service and prevent DNS rebinding against a loopback-bound server
+- [ ] T084 [P] [US3] Extend `audit_status` in `src/server.rs` with the transport kind and authentication mode per contracts/mcp-tools.md
 
 **Checkpoint**: All three stories work independently.
 
@@ -211,16 +213,16 @@ starting T070.
 
 ## Phase 6: Polish & Cross-Cutting Concerns
 
-- [ ] T083 [P] Update `README.md`: the three optional modes, the new `run_scan` arguments and response fields, and an explicit statement that the default is unchanged
-- [ ] T084 [P] Update `docs/ARCHITECTURE.md` with the executor seam, the workspace layer, the HTTP surface, and why status determination deliberately stays out of the executor
-- [ ] T085 [P] Update `docs/SECURITY.md` with the threat model this feature introduces: SSRF, confused-deputy authorization, credential leakage, metrics exposure, and multi-tenant isolation
-- [ ] T086 [P] Add `docs/DEPLOYMENT.md` with example Kubernetes manifests — RBAC for Job management, a Secret for credentials, and a scrape-only path to `/metrics`
-- [ ] T087 [P] Ship a container image containing `git`, and document that the clone path depends on it (R5)
-- [ ] T088 Run every scenario in `specs/001-hosted-execution-modes/quickstart.md`, Scenario 0 first and last
-- [ ] T089 Confirm SC-001 by diffing a default-configuration `list_scanners` and `run_scan` response against the pre-feature baseline
-- [ ] T090 [P] Run `cargo clippy --all-features -- -D warnings` and `cargo fmt --check`
-- [ ] T091 Review whether any constitution principle needs amending, and record the reasoning in `.specify/memory/constitution.md` if so — the constitution requires an explicit amendment rather than a quiet exception
-- [ ] T092 Close or re-record the remaining open questions in `specs/001-hosted-execution-modes/research.md`: pod log interleaving (T052) and persistent scanner caching in-cluster (T058)
+- [ ] T085 [P] Update `README.md`: the three optional modes, the new `run_scan` arguments and response fields, and an explicit statement that the default is unchanged
+- [ ] T086 [P] Update `docs/ARCHITECTURE.md` with the executor seam, the workspace layer, the HTTP surface, and why status determination deliberately stays out of the executor
+- [ ] T087 [P] Update `docs/SECURITY.md` with the threat model this feature introduces: SSRF, confused-deputy authorization, credential leakage, metrics exposure, and multi-tenant isolation
+- [ ] T088 [P] Add `docs/DEPLOYMENT.md` with example Kubernetes manifests — RBAC for Job management, a Secret for credentials, and a scrape-only path to `/metrics`
+- [ ] T089 [P] Ship a container image containing `git`, and document that the clone path depends on it (R5)
+- [ ] T090 Run every scenario in `specs/001-hosted-execution-modes/quickstart.md`, Scenario 0 first and last, including scraping `/metrics` and confirming scan counts by status and backend reachability are readable without opening a log (SC-011)
+- [ ] T091 Confirm SC-001 by diffing a default-configuration `list_scanners` and `run_scan` response against the pre-feature baseline
+- [ ] T092 [P] Run `cargo clippy --all-features -- -D warnings` and `cargo fmt --check`
+- [ ] T093 Review whether any constitution principle needs amending, and record the reasoning in `.specify/memory/constitution.md` if so — the constitution requires an explicit amendment rather than a quiet exception
+- [ ] T094 Close or re-record the remaining open questions in `specs/001-hosted-execution-modes/research.md`: pod log interleaving (T053) and persistent scanner caching in-cluster (T059)
 
 ---
 
@@ -248,8 +250,8 @@ starting T070.
 - Foundational: T012–T017 are independent files and can run alongside the executor extraction (T007–T011); T018 needs T007
 - US1: all six test tasks (T021–T026) in parallel; T027 and T029 in parallel; T036 and T041 independent of the clone chain
 - US2: all three test tasks (T043–T045) in parallel; T046 gates the rest
-- US3: all six test tasks (T059–T064) in parallel; T066, T073, T074, T078, T079, T081 are independent of the auth chain
-- Polish: T083–T087 and T090 in parallel
+- US3: all six test tasks (T060–T065) in parallel; T067, T075, T076, T080, T081, T083 are independent of the auth chain
+- Polish: T085–T089 and T092 in parallel
 - Across stories: once Phase 2 is green, US1, US2, and US3 can be staffed in parallel
 
 ---

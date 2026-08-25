@@ -98,7 +98,18 @@ orphans. A bare Pod would need us to reimplement both.
 **Workspace delivery**: a git-clone initContainer writes into an `emptyDir` that
 the scanner container mounts **read-only**. This keeps FR-013's isolation
 guarantee identical to the Docker path and requires no host mount, no PVC, and
-no Docker socket.
+no Docker socket. The clone image is **pinned**: an unpinned tag that drifts or
+404s is the same failure class as the unpinned detekt download that once
+delivered an HTML error page masquerading as a jar.
+
+**Capabilities**: the Kubernetes path drops all capabilities and, unlike the
+Docker path, restores none. `DAC_READ_SEARCH` exists in the Docker backend to
+read host directories that a bind mount exposes with foreign ownership — a
+`0700` build directory owned by the host user was enough to fail an entire
+scan. An `emptyDir` written by our own initContainer has uniform ownership we
+control, so the grant would buy nothing, and constitution III requires any
+relaxation to be the narrowest possible. If T052 turns up a concrete case, it
+gets added deliberately with a reason.
 
 **Alternatives considered**: A shared PVC across scanners in one scan — avoids
 re-cloning per scanner, but introduces a ReadWriteMany storage requirement that
@@ -124,6 +135,15 @@ need for a binary in the cluster path.
 **Consequence**: `git` becomes a runtime dependency of the clone feature. It is
 absent from a scratch container, so the shipped image must include it, and the
 status tool should report its availability rather than failing a scan late.
+
+**Bounding clone size** (FR-006): prefer the git-native lever — a partial clone
+that refuses blobs above the budget — because it stops the transfer at the
+remote rather than after the bytes have landed. Not every remote supports it,
+so a coarse sampled check of the working tree backs it up, reusing the bounded
+directory walk that language detection already has. Sampling makes the budget a
+ceiling that can overshoot by one interval; a byte-exact limit would mean
+watching every write, which is not worth the cost for a guard against runaway
+clones.
 
 ## R6. GitHub App authentication
 
