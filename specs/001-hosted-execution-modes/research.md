@@ -252,13 +252,34 @@ provide.
 scanner to finish. A clone released while a straggler or a timed-out scanner
 still holds it produces failures that look like flaky findings (FR-005a).
 
-## Open questions for implementation
+## Answered during implementation
 
-- Does `kube`'s log API return the same interleaving behaviour as Docker's?
-  The Docker path had to separate stdout from stderr because interleaving
-  corrupted gosec's SARIF. The Kubernetes equivalent must be checked, not
-  assumed — if pod logs are already merged, some scanners will need their
-  stderr redirected in the command instead.
+**Pod logs are merged** (was an open question). `pods/log` returns a single
+buffer with no stream separation, which is exactly the condition that corrupted
+gosec's SARIF locally. Resolved by redirecting stderr to a file inside the
+container and replaying it after a marker, so the parser still receives clean
+stdout. A distroless image has no shell to wrap with, so its streams stay
+merged and the backend does not pretend otherwise.
+
+**Listing is not an availability check.** The API server answers successfully
+for a namespace that does not exist, so a typo'd namespace looked healthy until
+the first scan failed. Availability is now a dry-run Job create, which
+validates namespace and RBAC without creating anything.
+
+**A local path cannot be sent to a cluster.** The Kubernetes backend needs a
+repository target and refuses a local path with an explanation. Scanning an
+empty `emptyDir` and reporting it clean would be the worst possible answer.
+
+**Partial clone is the wrong size lever** (correcting R5). `--filter=blob:limit`
+leaves the working tree with absent blobs, so scanners would read incomplete
+files — worse than not bounding size at all. Size is bounded by shallow depth
+plus a sampled working-tree check instead.
+
+**`jsonwebtoken` is not an HTTP-transport dependency** (correcting the plan).
+Signing the GitHub App assertion is part of the always-on clone path, so it
+moved out of the `http` feature.
+
+## Open questions for implementation
 - How does a caller-scoped forge credential reach the authorization check
   (R10) under a JWT-only IdP — token exchange, a caller-supplied token, or
   provider-specific claims? Blocks Phase D only.

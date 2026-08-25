@@ -12,8 +12,12 @@ flowchart TD
     SRC --> SERVER["server.rs<br/>MCP boundary: tool definitions, request routing"]
     SRC --> MODELS["models.rs<br/>shared data contract (findings, scanner definitions, etc.)"]
     SRC --> SCANNERS["scanners.rs<br/>static scanner catalog and registry"]
-    SRC --> RUNNER["runner.rs<br/>Docker container lifecycle, timeouts, exit-code policy"]
+    SRC --> RUNNER["runner.rs<br/>normalization, status rules, exit-code policy"]
+    SRC --> EXECUTOR["executor/<br/>pluggable backends: docker, kubernetes"]
+    SRC --> WORKSPACE["workspace/<br/>target parsing, credentials, cloning, cleanup"]
     SRC --> PARSERS["parsers/<br/>SARIF + tool-native JSON normalization"]
+    SRC --> CONFIG["config.rs<br/>configuration + startup validation"]
+    SRC --> REDACT["redact.rs<br/>secret redaction at the response boundary"]
     SRC --> SELECTION["selection.rs<br/>language-based scanner auto-selection"]
     SRC --> EXPLAIN["explain.rs<br/>finding explanation knowledge base"]
     SRC --> FIXES["fixes.rs<br/>remediation suggestion generation"]
@@ -114,6 +118,66 @@ Detection reads the target's **contents**, not its path string:
 
 The `security` profile is cross-language and is always unioned in. `lighthouse` and `bundlephobia` are deliberately excluded from auto-selection: they take a URL or package name, not a repository path.
 
+### `executor/`
+
+The seam that makes remote execution possible without forking the pipeline. An
+`Executor` runs one scanner against one prepared workspace and returns raw
+output, an exit code, and a duration — **no status and no findings**. That
+omission is the design: if each backend decided its own statuses, "clean" would
+come to mean something subtly different in each one.
+
+- `executor/docker.rs` — local containers. Restores `DAC_READ_SEARCH` because a
+  host bind mount can expose directories with foreign ownership.
+- `executor/kubernetes.rs` — one `batch/v1` Job per scanner, behind the
+  `kubernetes` feature. Drops all capabilities and adds none: an `emptyDir`
+  written by our own initContainer has ownership we control, so the Docker
+  path's exception does not apply here.
+
+Two things the Kubernetes backend has to work around, both discovered by
+running it rather than by reading docs:
+
+- **Pod logs are merged.** `pods/log` returns one buffer, the same condition
+  that corrupted gosec's SARIF locally. Where a command runs through a shell,
+  stderr is redirected to a file and replayed after a marker so parsers still
+  see clean stdout. A distroless image has no shell to wrap with, so its
+  streams stay merged.
+- **Listing is not an availability check.** The API server answers happily for
+  a namespace that does not exist. Availability is a dry-run Job create, which
+  asks the question that matters — may we create a Job *here*? — and validates
+  namespace and RBAC without creating anything.
+
+### `workspace/`
+
+What a scan actually runs against: a caller's local path, used as-is and never
+modified, or a repository cloned to a directory this process owns and must
+delete.
+
+- `workspace/target.rs` — parses local paths, HTTPS and SSH URLs, and
+  `owner/repo`. Parsing is side-effect free, so it is exhaustively testable;
+  address *classification* is separated from resolution for the same reason. An
+  existing local path always wins, which is what guarantees no current caller's
+  target changes meaning.
+- `workspace/credentials.rs` — GitHub App, token, SSH key, anonymous. `Secret`
+  cannot be printed: a derived `Debug` would leak it the first time anyone
+  logged a struct containing one.
+- `workspace/clone.rs` — invokes `git`. No secret ever reaches an argv, because
+  a process listing is world readable and an environment is not; git gets a
+  credential helper whose *shape* is in the command line and whose token comes
+  from the environment.
+- `workspace/mod.rs` — provisioning, symlink containment, orphan reaping.
+
+Release is by ownership: every scanner holds an `Arc` to the one workspace its
+scan provisioned, and the last to drop takes the directory with it. A straggler
+cannot have the tree deleted underneath it, and that is true by construction
+rather than by care.
+
+### `redact.rs`
+
+Redaction runs **before** truncation, always. Truncating first can cut a secret
+in half, and half a credential is still half a credential. It covers logs *and*
+the reported command — a sentinel test found `execution.command` publishing a
+token that nobody had thought to redact.
+
 ### `parsers/`
 
 The normalization layer, in preference order:
@@ -173,6 +237,17 @@ Three layers:
 - **Unit tests** — `#[cfg(test)]` modules inline in `models.rs`, `parsers/*`, `runner.rs`, `scanners.rs`, `selection.rs`, and `server.rs`. No Docker required; part of the default `cargo test` run. The parser tests pin real tool output shapes, and the registry tests enforce the catalog invariants above.
 - **End-to-end tests** — `tests/e2e_scan.rs`. Runs real scanner containers via `DockerScannerRunner` through the full `AuditMcpServer` tool surface (`run_scan`, `list_scanners`, `explain_finding`) against fixtures in `tests/fixtures/`. Each Docker-dependent test is `#[ignore]`d and self-skips (with a message) if no daemon is reachable, so `cargo test` alone stays fast and hermetic. Run explicitly with `cargo test --test e2e_scan -- --ignored` whenever a change touches `runner.rs`, a scanner's `command_template`, or `image_cache_config`.
 
+- **Clone tests** — `tests/workspace_clone.rs`, against a real remote. The
+  cleanup assertions matter more than the happy path: a workspace surviving a
+  *successful* scan is a bug someone notices, one surviving a *failed* scan is
+  a slow disk leak nobody notices.
+- **Secret hygiene** — `tests/secret_hygiene.rs`. Seeds a sentinel into every
+  credential source, runs a real scan, serializes the whole response, and
+  asserts the sentinel appears nowhere. Reviewing for this by eye does not
+  work.
+- **Backend parity** — `tests/executor_parity.rs`. The same scanner and
+  repository through both backends must yield the same rule IDs, severities,
+  and locations.
 - **Scanner smoke tests** — `tests/scanner_smoke.rs`. Runs every scanner that declares structured output against a matching fixture and asserts it does not come back as `tool_error`, `timeout`, or `unparsed`. Split by cost into `smoke_fast_tier`, `smoke_slow_tier` (Go/Rust, which compile first), `smoke_jvm_tier`, `smoke_scripting_tier` (Ruby/PHP), `smoke_dotnet_tier`, and `smoke_elixir_tier`. This is the only layer that catches a command template no image can execute — a swallowed ENTRYPOINT, a renamed flag, a tool missing from the base image, a `-quiet` that suppresses the whole report. Run it after any change to a `command_template`, an image, or an install script.
 
   Set `AUDIT_MCP_CORPUS` to a directory of real example projects to smoke the scanners against realistic code instead of the minimal in-repo fixtures:

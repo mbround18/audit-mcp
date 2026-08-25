@@ -6,6 +6,8 @@ Point it at any directory and your AI assistant can audit it — without install
 
 It is built to **run anyway**: the server starts without Docker, `mode=all` figures out the languages from what is actually in the directory, every scanner has a wall-clock budget, and a scanner that cannot run says so instead of reporting a clean bill of health.
 
+Point it at a path, or at a repository you have never checked out. Run the scanners in local Docker containers, or as Kubernetes Jobs in a cluster.
+
 ## Features
 
 - **95+ scanners** across Rust, Go, Python, Node, IaC/Kubernetes, Java, Ruby, PHP, .NET, C/C++, Kotlin, Elixir, SQL, and Shell — plus a cross-language security layer (semgrep, gitleaks, grype, osv-scanner) that runs on every target
@@ -14,6 +16,8 @@ It is built to **run anyway**: the server starts without Docker, `mode=all` figu
 - **Fully isolated** — every scanner runs in its own ephemeral Docker container with a read-only workspace mount, `no-new-privileges`, and all Linux capabilities dropped
 - **Bounded** — per-scanner timeouts, a container concurrency cap, and severity filtering / result caps so a large repo cannot hang the call or flood your context
 - **Persistent cache** — named Docker volumes share downloaded packages and compiled artifacts across runs so repeated scans are fast
+- **Remote repositories** — `target` accepts a git URL or `owner/repo`; the server clones it, scans it, and deletes it. Public repositories need no configuration
+- **Two execution backends** — local Docker by default, or Kubernetes Jobs when there is no Docker socket to hand out. Both produce identical findings, and a test enforces that
 - **MCP-native** — exposes `list_scanners`, `audit_status`, `run_scan`, `explain_finding`, and `suggest_fixes` as structured tools any MCP client can call
 - **Content-based language detection** — `mode=all` walks the target directory for manifests and source files, so a polyglot repo gets every relevant scanner
 
@@ -69,6 +73,8 @@ Reports whether a Docker daemon is reachable and how much of the catalog produce
 | `mode`             | `"single" \| "many" \| "all"`  | How scanners are selected (default: `single`)                      |
 | `scanner`          | `string`                       | Scanner name — required when `mode=single`                         |
 | `scanners`         | `string[]`                     | Scanner names — required when `mode=many`                          |
+| `ref`              | `string`                       | Branch, tag, or commit when `target` is a repository (or inline as `target#ref`) |
+| `subdir`           | `string`                       | Scan only this path within the repository                          |
 | `min_severity`     | `string`                       | Drop findings below this level (`info`/`low`/`medium`/`high`/`critical`) |
 | `max_findings`     | `number`                       | Cap findings returned (default 200; the budget goes to the most severe first) |
 | `include_raw_logs` | `boolean`                      | Attach raw stdout/stderr even when parsing succeeded               |
@@ -76,6 +82,20 @@ Reports whether a Docker daemon is reachable and how much of the catalog produce
 | `max_parallel`     | `number`                       | Concurrent scanner containers (default 4)                          |
 
 `mode=all` auto-selects scanners by walking the target directory for ecosystem markers. A file target mounts its parent directory and scopes the scanner to that one file.
+
+#### Targets
+
+| Form | Example |
+| ---- | ------- |
+| Local path | `/home/me/project` |
+| HTTPS git URL | `https://github.com/owner/repo` |
+| SSH git URL | `git@github.com:owner/repo.git` |
+| Shorthand | `owner/repo` (GitHub) |
+| With a ref | any of the above plus `#main`, `#v1.2.3`, or `#a1b2c3d` |
+
+An existing local path always wins, so nothing you scan today changes meaning.
+
+The response reports a `workspace` block naming the origin, the normalized source URL, the exact commit scanned, and which credential source was used — the source's *name*, never its value.
 
 #### Run statuses
 
@@ -99,6 +119,33 @@ Takes a scanner name and finding ID, returns a plain-language explanation and re
 ### `suggest_fixes`
 
 Takes an array of normalized findings, returns minimal fix suggestions.
+
+## Remote repositories
+
+Set none of these and public repositories still clone. Credentials are used in this order, and only ever for the transport they can authenticate:
+
+| Variable(s) | Use |
+| ----------- | --- |
+| `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_APP_INSTALLATION_ID` | GitHub App installation token, minted fresh per scan. All three or none |
+| `GITHUB_TOKEN` | Token or PAT over HTTPS |
+| `SSH_PRIVATE_KEY` + `SSH_KNOWN_HOSTS` | git over SSH. Host key checking is never silently disabled, so both are required |
+
+Bounds, all overridable: shallow clone (`AUDIT_CLONE_DEPTH=1`), 300 s (`AUDIT_CLONE_TIMEOUT_SECS`), 2 GiB (`AUDIT_CLONE_MAX_BYTES`). A target resolving to a private, loopback, or link-local address is refused unless `AUDIT_ALLOW_PRIVATE_ADDRESSES=true`; `AUDIT_ALLOW_REMOTE_TARGETS=false` disables cloning entirely.
+
+The clone is removed when the scan ends — including when it fails or times out — and workspaces orphaned by a killed process are reaped at startup.
+
+## Kubernetes execution
+
+```bash
+cargo build --release --features kubernetes
+AUDIT_EXECUTOR=kubernetes AUDIT_K8S_NAMESPACE=audit audit-mcp
+```
+
+Each scanner becomes a `batch/v1` Job. Cluster credentials come from the in-cluster ServiceAccount when present, otherwise your kubeconfig. The workspace arrives through a git-clone initContainer writing into an `emptyDir` the scanner mounts read-only — no host path, no PVC, and no Docker socket, which is a stronger posture than the local default.
+
+Because a cluster cannot see your filesystem, this backend needs a **repository** target; a local path is refused with an explanation rather than scanned as an empty directory. Clone credentials are delivered through a Secret, never the Job spec, which is readable by anyone with `get jobs` in the namespace.
+
+Operator settings: `AUDIT_K8S_SERVICE_ACCOUNT`, `AUDIT_K8S_CPU_REQUEST` / `AUDIT_K8S_CPU_LIMIT`, `AUDIT_K8S_MEMORY_REQUEST` / `AUDIT_K8S_MEMORY_LIMIT`, `AUDIT_K8S_NODE_SELECTOR`, `AUDIT_K8S_TOLERATIONS`, `AUDIT_K8S_IMAGE_PULL_SECRETS`, `AUDIT_K8S_JOB_TTL_SECONDS`. See [contracts/configuration.md](specs/001-hosted-execution-modes/contracts/configuration.md).
 
 ## Supported languages and scanners
 
@@ -154,6 +201,13 @@ cargo test --test e2e_scan -- --ignored
 
 # verify scanner command templates actually execute in their images
 cargo test --test scanner_smoke -- --ignored --nocapture
+
+# clone paths against a real remote, and the secret-leak sentinel
+cargo test --test workspace_clone -- --ignored
+cargo test --test secret_hygiene -- --ignored
+
+# Docker/Kubernetes parity (needs a cluster and a usable namespace)
+cargo test --features kubernetes --test executor_parity -- --ignored
 
 # lint
 cargo clippy -- -D warnings
