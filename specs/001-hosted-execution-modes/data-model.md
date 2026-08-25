@@ -14,12 +14,17 @@ A directory a scan runs against.
 | `origin` | How it came to exist (see **Workspace Origin**) |
 | `resolved_ref` | Commit SHA actually scanned; `None` for a local path |
 | `owned` | Whether this process must delete it |
+| `holders` | How many scanners still have it open |
 
 **Rules**
 
 - An owned workspace is deleted when the scan ends — success, failure, or
   timeout (FR-005). Deletion is the responsibility of whoever created it, and
   must not depend on the happy path being taken.
+- A scan provisions **one** workspace, shared read-only by every scanner it
+  runs (FR-005a). Release is refcounted, not triggered by the first scanner to
+  finish: a clone deleted while a straggler or a timed-out scanner still holds
+  it produces failures that look exactly like flaky findings.
 - A workspace not owned by us (a caller's local directory) is never deleted or
   modified.
 - `resolved_ref` is reported in the response so a result can be tied to an
@@ -166,9 +171,10 @@ Who is making a request on the hosted transport.
 
 | Attribute | Meaning |
 |-----------|---------|
-| `subject` | Stable identifier from the validated token |
+| `subject` | Stable identifier from the validated JWT |
 | `issuer` | Which authorization server minted it |
 | `limits` | Concurrency and any per-caller restriction |
+| `access_check` | The means of confirming what this caller may read |
 
 **Rules**
 
@@ -178,6 +184,31 @@ Who is making a request on the hosted transport.
   audience** (FR-022). A token minted for another resource yields no identity.
 - Two callers' scans share no workspace, no findings, and no credentials
   (FR-024).
+- An identity authenticates a caller; it does not entitle them to anything. A
+  remote target requires a separate, per-scan confirmation that *this* caller
+  can read *that* repository, before any server-held credential is used
+  (FR-031–FR-035). Decisions may be cached, keyed by caller and repository,
+  with a bounded lifetime so revoked access stops working promptly.
+
+## Authorization Decision
+
+The cached result of checking whether one caller may read one repository.
+
+| Attribute | Meaning |
+|-----------|---------|
+| `caller` | Subject the decision applies to |
+| `repository` | Normalized repository identity |
+| `allowed` | Whether the read is permitted |
+| `expires_at` | When the decision must be re-checked |
+
+**Rules**
+
+- Keyed by caller *and* repository; a decision for one caller never applies to
+  another (FR-034).
+- Bounded lifetime, so revoking someone's access takes effect without a
+  restart.
+- A refusal is recorded in the Scan Record like any other outcome (FR-035), so
+  attempts to reach unauthorized repositories are visible rather than silent.
 
 ## Scan Record
 
@@ -205,6 +236,7 @@ The audit trail for one scan.
 | `RunScanResponse` | Gains `workspace` (origin + resolved ref) | Additive |
 | `ScanExecution` | Gains `backend` naming the executor used | Additive |
 | `AuditStatusResponse` | Gains active backend, its reachability, `git` availability, and configured credential source names | Additive |
+| `CallerIdentity`, `AuthorizationDecision` | New; hosted transport only | New |
 | `ScannerDefinition` | Unchanged | — |
 | `NormalizedFinding` | Unchanged | — |
 | `RunStatus` | Unchanged — new failures map to existing variants | — |

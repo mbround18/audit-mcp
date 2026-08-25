@@ -71,10 +71,23 @@ configuration we offer.
 |----------|--------|
 | `AUDIT_OAUTH_ISSUER` | Authorization server issuer URL; metadata is discovered from it |
 | `AUDIT_OAUTH_JWKS_URL` | Override JWKS location (default: discovered) |
-| `AUDIT_OAUTH_INTROSPECTION_URL` | Enables RFC 7662 introspection for opaque tokens |
-| `AUDIT_OAUTH_CLIENT_ID`, `AUDIT_OAUTH_CLIENT_SECRET` | Credentials for the introspection endpoint |
 | `AUDIT_OAUTH_REQUIRED_SCOPE` | Scope a token must carry |
 | `AUDIT_MAX_SCANS_PER_CALLER` | Per-caller concurrent scan ceiling (default `2`) |
+| `AUDIT_AUTHZ_CACHE_TTL_SECS` | How long a per-caller repository access decision may be cached (default `300`) |
+
+Only JWT-issuing OIDC providers are supported in the first release. There is no
+introspection configuration because opaque tokens are out of scope (FR-021a).
+
+## Observability
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `AUDIT_METRICS_BIND` | same listener as MCP | Bind the Prometheus endpoint separately so it can be exposed only to scrape infrastructure |
+| `AUDIT_LOG_FORMAT` | `json` | Structured log format |
+| `AUDIT_LOG_LEVEL` | `info` | Server log verbosity |
+
+On the stdio transport, server logs go to stderr. Writing them to stdout would
+corrupt the JSON-RPC protocol stream (FR-036).
 
 ## Startup validation
 

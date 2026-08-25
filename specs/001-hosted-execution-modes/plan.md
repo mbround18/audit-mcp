@@ -31,12 +31,14 @@ logic.
 **Primary Dependencies**: existing — `rmcp` 1.7 (`transport-streamable-http-server`
 feature to be added), `bollard`, `tokio`, `serde`. New — `kube` + `k8s-openapi`
 (Kubernetes backend), `axum` (HTTP surface around rmcp's tower service),
-`jsonwebtoken` (JWT validation and GitHub App JWT signing), `reqwest` (JWKS,
-introspection, GitHub App token exchange), `tempfile` (workspace lifetimes).
-Runtime — the `git` binary.
+`jsonwebtoken` (JWT validation and GitHub App JWT signing), `reqwest` (JWKS
+and GitHub App token exchange), `tempfile` (workspace lifetimes), plus a
+metrics exporter for the Prometheus endpoint. Runtime — the `git` binary.
 
-**Storage**: None persistent. Temporary clone directories with an explicit
-cleanup obligation; an append-only audit log of scan records.
+**Storage**: None. The server persists nothing: temporary clone directories
+carry an explicit cleanup obligation, and scan audit records are emitted as
+structured log lines for the operator's pipeline to collect (FR-026). There is
+no database, no audit file, and no way to query past scans.
 
 **Testing**: `cargo test` (hermetic, no Docker/network — must stay that way);
 `tests/e2e_scan.rs` and `tests/scanner_smoke.rs` (`#[ignore]`d, self-skipping)
@@ -72,6 +74,13 @@ Isolation requirements are scoped to colleagues, per the spec's assumptions.
 | **IV. Bounded by default** | Every new input needs a bound | **PASS.** Clone size, depth, and duration are bounded (FR-006); per-caller concurrency is bounded (FR-025); the existing per-scan concurrency and findings caps apply unchanged. |
 | **V. Degrade, don't disappear** | Missing infrastructure must not prevent startup | **PASS.** The Kubernetes client connects lazily exactly as the Docker client does; an unreachable backend yields one preflight error (FR-016) and the status tool reports which backend is active and whether it is reachable (FR-017). |
 | **VI. Normalize once, at the edge** | Findings must be backend-independent | **PASS.** Container-path stripping already exists and gains the clone-root case (FR-007). SC-008 states the requirement directly: a third backend must require no change to normalization, status, or shaping. |
+
+**Clarification session 2026-08-25 added two gates:**
+
+| Gate | Assessment |
+|------|------------|
+| Authentication is not authorization (FR-031–FR-035) | A caller's own identity must be shown to grant read access *before* a server-held credential touches the repository. Without this the server is a confused deputy laundering its own credentials; with it, the worst an authenticated caller can reach is what they could already read. |
+| Observability must not leak (FR-036–FR-039) | The metrics endpoint is deliberately less protected than the MCP endpoint, so repository names, target URLs, caller subjects, and paths are barred from label values. Server logs must never share a stream with the stdio transport, which would corrupt its JSON-RPC output. |
 
 **Additional constraints check**: The default `cargo test` run must stay
 hermetic (SC-009) — every new test that needs a cluster, a network, or a
@@ -140,9 +149,11 @@ src/
 │   └── kubernetes.rs        # Job lifecycle
 ├── runner.rs                # retains normalization, status, timeout policy
 ├── redact.rs                # NEW — secret redaction at the response boundary
+├── observe.rs               # NEW — structured logs + Prometheus metrics
 └── http/                    # NEW — P3
     ├── mod.rs               # axum app wrapping rmcp's tower service
-    ├── auth.rs              # resource server: challenge, JWKS, introspection
+    ├── auth.rs              # resource server: challenge, JWKS validation
+    ├── authz.rs             # per-caller repository access verification
     └── metadata.rs          # protected resource metadata document
 
 tests/
@@ -169,7 +180,7 @@ the strongest signal the seam is drawn in the right place.
 | A | — | `Executor` trait extracted; Docker backend behind it; no behaviour change | Full existing suite green, including both smoke tiers |
 | B | US1 (P1) | Clone from URL, all four credential sources, cleanup, redaction | SC-002, SC-004, SC-005 |
 | C | US2 (P2) | Kubernetes Job backend | SC-003 parity, SC-007 |
-| D | US3 (P3) | HTTP transport + resource server | SC-001 unchanged default, SC-006 |
+| D | US3 (P3) | HTTP transport, resource server, per-caller authorization, metrics | SC-001 unchanged default, SC-006, SC-010, SC-011, SC-012 |
 
 Phase A ships no user-visible change and must be provably behaviour-preserving —
 that is precisely why it goes first and alone.

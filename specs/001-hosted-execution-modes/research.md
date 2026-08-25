@@ -56,18 +56,23 @@ folding it into "validate the token".
 
 ## R3. How should tokens be validated?
 
-**Decision**: Support both, JWT-first. Validate JWTs locally against the
-provider's JWKS with cached keys; fall back to RFC 7662 token introspection
-when the provider issues opaque tokens.
+**Decision** (settled in the 2026-08-25 clarification session): JWT only for
+the first release. Validate JWTs locally against the provider's JWKS with
+cached keys. RFC 7662 introspection is deferred.
 
-**Rationale**: Most providers (Entra, Auth0, Okta, Keycloak) issue JWTs, and
-local validation costs no network round trip per request. GitHub issues opaque
-tokens, and GitHub is the most likely provider here given the rest of the
-feature — so introspection cannot be skipped.
+**Rationale**: Every mainstream OIDC provider (Entra, Auth0, Okta, Keycloak,
+Google) issues JWTs, and local validation costs no network round trip per
+request. One code path covers all of them.
 
-**Alternatives considered**: JWT-only, which would exclude GitHub as an IdP.
-Introspection-only, which adds a provider round trip to every MCP call and
-makes the provider a hard availability dependency.
+**Consequence**: GitHub-as-IdP does not work on day one, because GitHub issues
+opaque tokens. That is an accepted trade — every other likely provider (Entra,
+Auth0, Okta, Keycloak, Google) issues JWTs, and the audience and scope checks
+are provider-independent, so introspection can be added later without changing
+any contract.
+
+**Alternatives considered**: Introspection-only, which adds a provider round
+trip to every MCP call and makes the provider a hard availability dependency.
+Both up front, rejected as first-release scope.
 
 **Care required**: Cache JWKS with a bounded TTL and handle key rotation;
 validate `iss`, `aud`, `exp`, and `nbf`; reject `alg: none` and any algorithm
@@ -193,6 +198,40 @@ one place.
 Kubernetes equivalent. The first implementation should accept a cold cache in
 the cluster (correctness first) and treat persistent caching as a follow-up.
 
+## R10. Verifying a caller's own repository access
+
+**Decision** (2026-08-25 clarification): before a server-held credential is used
+against a repository, confirm the calling identity can itself read it.
+
+**Rationale**: Without this the server is a textbook confused deputy. It holds
+a GitHub App installation credential with broad read access; any caller able to
+authenticate could otherwise point it at any repository that installation
+reaches and receive the contents back as findings. The check bounds what a
+caller can obtain to what they could already read.
+
+**Care required**: The check needs a caller-scoped forge credential, which
+under a JWT-only first release (R3) means either exchanging the OIDC token for
+one, or having the caller supply it. This is the sharpest remaining design
+question for Phase D. It does not block Phases A–C.
+
+**Cache**: decisions may be cached, keyed by (caller, repository), with a
+bounded lifetime so revoked access stops working promptly (FR-034).
+
+## R11. Shared workspace for a multi-scanner scan
+
+**Decision** (2026-08-25 clarification): one clone per scan, shared read-only by
+every scanner in that scan.
+
+**Rationale**: The workspace is mounted read-only in every backend, so
+concurrent readers cannot interfere by construction. Cloning once per scanner
+would multiply clone time and disk by the scanner count — a dozen times over
+for `mode=all` — and buy no isolation that the read-only mount does not already
+provide.
+
+**Care required**: The release must be refcounted, not tied to the first
+scanner to finish. A clone released while a straggler or a timed-out scanner
+still holds it produces failures that look like flaky findings (FR-005a).
+
 ## Open questions for implementation
 
 - Does `kube`'s log API return the same interleaving behaviour as Docker's?
@@ -200,8 +239,10 @@ the cluster (correctness first) and treat persistent caching as a follow-up.
   corrupted gosec's SARIF. The Kubernetes equivalent must be checked, not
   assumed — if pod logs are already merged, some scanners will need their
   stderr redirected in the command instead.
-- Which identity provider is the first target? It determines whether the
-  introspection path (R3) is needed on day one or can follow.
-- Should a `mode=all` scan of a cloned repository run one clone shared by all
-  scanners (cheaper) or one per scanner (simpler isolation)? Shared is assumed;
-  confirm it does not break scanners that write to the workspace root.
+- How does a caller-scoped forge credential reach the authorization check
+  (R10) under a JWT-only IdP — token exchange, a caller-supplied token, or
+  provider-specific claims? Blocks Phase D only.
+
+**Closed by the 2026-08-25 clarification session**: the first identity provider
+(R3), caller authorization (R10), the workspace sharing model (R11), and the
+audit record destination (structured logs, no storage).

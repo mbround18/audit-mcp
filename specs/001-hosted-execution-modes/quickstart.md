@@ -16,7 +16,7 @@ rules in [contracts/http-transport.md](./contracts/http-transport.md).
 | 1 — public clone | Docker, network, `git` |
 | 2 — private clone | The above, plus one credential source |
 | 3 — Kubernetes | A cluster (`kind` is sufficient) |
-| 4 — hosted transport | An identity provider, or a local mock issuer |
+| 4 — hosted transport | A JWT-issuing OIDC provider, or a local mock issuer |
 
 ```bash
 cargo build
@@ -168,6 +168,29 @@ server most often gets wrong:
 cargo test --test http_auth -- --ignored
 ```
 
+**Authorization (SC-010)** — the check that stops the server laundering its own
+credentials. With a server-held GitHub App credential that *can* reach a private
+repository, authenticate as a caller who cannot read it and target it:
+
+```bash
+# expect: refused, with no indication of whether the repository exists
+```
+
+The server credential must never touch the repository. Confirm the refusal is
+recorded in the audit log (FR-035).
+
+**Metrics (SC-011, SC-012)**
+
+```bash
+curl -s localhost:8080/metrics | grep audit_
+curl -s localhost:8080/metrics | grep -i 'my-private-repo'   # must return nothing
+```
+
+The first shows scans by status and backend reachability without reading a log
+line. The second proves no repository name, target URL, caller subject, or file
+path leaked into a label value — the endpoint is deliberately less protected
+than `/mcp`, so anything in a label is effectively public.
+
 **Isolation**: with two identities scanning concurrently, neither response
 contains the other's target, findings, or workspace.
 
@@ -180,7 +203,7 @@ contains the other's target, findings, or workspace.
 | A — executor extracted | Scenario 0 green, no behaviour change |
 | B — remote repositories | Scenarios 0, 1, 2 green |
 | C — Kubernetes | Scenarios 0, 3 green |
-| D — hosted transport | Scenarios 0, 4 green |
+| D — hosted transport | Scenarios 0, 4 green, including authorization and metrics |
 
 Scenario 0 appears in every row deliberately. The default path is the one
 almost everyone uses, and it is the one a refactor is most likely to break

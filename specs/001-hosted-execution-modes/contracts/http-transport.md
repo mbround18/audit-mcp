@@ -13,6 +13,7 @@ listener is opened and no token is required (FR-019).
 | `GET` | `/.well-known/oauth-protected-resource` | None | RFC 9728 metadata |
 | `GET` | `/healthz` | None | Liveness — no scanner or cluster state |
 | `GET` | `/readyz` | None | Readiness — backend reachable |
+| `GET` | `/metrics` | None (bindable separately) | Prometheus exposition |
 
 `/healthz` and `/readyz` are deliberately distinct: an unreachable Docker
 daemon or cluster makes the server *not ready* but still *alive*, and killing
@@ -48,15 +49,14 @@ Every authenticated request, in order. Any failure is `401`, with no detail
 about *which* check failed.
 
 1. `Authorization: Bearer <token>` present and well-formed.
-2. **JWT path** — signature verified against cached JWKS; algorithm on an
-   allowlist (`alg: none` rejected); `iss` matches the configured issuer; `exp`
-   and `nbf` valid.
-3. **Opaque path** — RFC 7662 introspection; `active` must be true.
-4. **Audience** — `aud` (or introspection `aud`) contains
-   `AUDIT_RESOURCE_URL`.
-5. **Scope** — contains `AUDIT_OAUTH_REQUIRED_SCOPE` when configured.
+2. **JWT** — signature verified against cached JWKS; algorithm on an allowlist
+   (`alg: none` rejected); `iss` matches the configured issuer; `exp` and `nbf`
+   valid. JWTs are the only supported token form in the first release; opaque
+   tokens and RFC 7662 introspection are deferred.
+3. **Audience** — `aud` contains `AUDIT_RESOURCE_URL`.
+4. **Scope** — contains `AUDIT_OAUTH_REQUIRED_SCOPE` when configured.
 
-Step 4 is not optional and not a formality. A token minted for a *different*
+Step 3 is not optional and not a formality. A token minted for a *different*
 resource, by the same issuer, must be rejected — otherwise any service sharing
 the identity provider can be used to drive this one. Rejecting it is SC-006,
 and it gets a dedicated test.
@@ -68,6 +68,26 @@ and it gets a dedicated test.
 | Wrong audience | `401` |
 | Valid token, missing required scope | `403` |
 | Valid, but per-caller concurrency exceeded | `429` + `Retry-After` |
+| Valid, but caller cannot read the requested repository | `403`, with no indication of whether it exists |
+
+## Authorization
+
+Authentication answers *who*; it does not answer *what they may scan*. Before a
+server-held clone credential touches a remote target, the caller's own identity
+must be shown to grant read access to it (FR-031–FR-035). A refusal is recorded
+in the scan record like any other outcome.
+
+## Metrics endpoint
+
+`GET /metrics` returns Prometheus exposition covering scans by terminal status,
+scan and per-scanner durations, backend reachability, in-flight executions and
+queue depth, and per-caller rejections.
+
+It requires no MCP token and is bindable separately from the MCP endpoint, so
+an operator can expose it only to their scrape infrastructure. Because it is
+deliberately less protected, label values must never carry a repository name,
+target URL, caller subject, or file path (FR-038) — those would both explode
+cardinality and publish private repository names.
 
 ## Session and identity
 

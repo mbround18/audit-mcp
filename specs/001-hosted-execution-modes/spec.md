@@ -51,6 +51,36 @@ the single-user developer tool.
   `GITHUB_APP_*` installation tokens, `SSH_PRIVATE_KEY`, a plain
   `GITHUB_TOKEN`/PAT, and anonymous public clone as the zero-configuration
   default.
+- Q: In hosted mode, what decides whether an authenticated caller is allowed to
+  scan a particular repository? → A: Verify per-scan against the caller's own
+  identity. Before cloning, confirm that *this caller* can read *this
+  repository* using a credential or identity belonging to them; a server-held
+  credential is used only after that check passes. Authentication alone is not
+  authorization, and a server credential must never be laundered into a read of
+  code the caller cannot themselves access.
+- Q: Where should scan audit records go, and how long should they be kept? →
+  A: Emitted as structured JSON to stdout/stderr only. The server persists
+  nothing and enforces no retention; operators ship and retain logs with
+  whatever they already use. This keeps the feature stateless and adds no
+  storage dependency.
+- Q: How should an operator tell what a hosted deployment is doing — is
+  structured logging enough, or does it need metrics as well? → A: Both.
+  Structured levelled logs plus a Prometheus `/metrics` endpoint exposing scan
+  counts by status, durations, backend reachability, queue depth, and
+  per-caller rejections.
+- Q: When `mode=all` runs many scanners against one cloned repository, should
+  they share a single clone or each get their own? → A: One clone per scan,
+  shared read-only by every scanner in that scan. The workspace is already
+  mounted read-only in every backend, so concurrent readers cannot interfere;
+  cloning once per scanner would multiply clone time and disk for no isolation
+  benefit.
+- Q: Which identity provider should the hosted mode work with on day one? →
+  A: Any standard OIDC provider issuing JWTs, validated against the provider's
+  JWKS. This covers Entra, Auth0, Okta, Keycloak, and Google through one code
+  path with no per-request round trip. Opaque-token introspection (RFC 7662),
+  which GitHub-as-IdP would require, is deferred — audience and scope checks
+  are identical either way, so it can be added later without changing the
+  contract.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -171,6 +201,10 @@ resource succeeds.
 6. **Given** a caller exceeds their configured concurrent-scan allowance,
    **When** they start another scan, **Then** it is refused or queued with a
    clear message, and other callers are unaffected.
+7. **Given** an authenticated caller who cannot themselves read a private
+   repository, **When** they target it, **Then** the scan is refused, the
+   server's own clone credential is never used against it, and the refusal does
+   not disclose whether the repository exists.
 
 ---
 
@@ -178,6 +212,8 @@ resource succeeds.
 
 **Cloning**
 
+- Many scanners reading one shared clone concurrently, and the clone being
+  released while a straggler or a timed-out scanner still holds it.
 - A repository larger than the configured size or depth budget — the clone
   must stop and report rather than filling the disk.
 - A repository whose history is huge but whose tree is small: shallow clone by
@@ -206,6 +242,10 @@ resource succeeds.
 
 **Hosted transport**
 
+- A metrics scrape from an untrusted network, or a scrape that reveals private
+  repository names through label values.
+- Server logs written to stdout corrupting the stdio transport's JSON-RPC
+  stream — the two must not share a stream.
 - Token audience confusion: a token for another resource presented here.
 - A caller whose identity is valid but who has no authorization to scan the
   requested target.
@@ -232,6 +272,10 @@ resource succeeds.
 - **FR-005**: The system MUST remove a cloned workspace after the scan
   completes, fails, or times out, and MUST reap orphaned workspaces left by an
   unclean shutdown.
+- **FR-005a**: A scan MUST provision at most one workspace, shared read-only by
+  every scanner it runs. The workspace MUST NOT be released while any scanner
+  still holds it, and MUST be released once the last one finishes — including
+  when that scanner failed or timed out.
 - **FR-006**: The system MUST bound clone size, depth, and duration, and MUST
   report a `tool_error` naming the exceeded budget rather than exhausting the
   host.
@@ -283,6 +327,11 @@ resource succeeds.
   OAuth 2.1 Resource Server: it MUST advertise its authorization server and
   resource identifier, reject unauthenticated requests with a challenge, and
   validate every presented token.
+- **FR-021a**: Token validation MUST support JWTs issued by any standard OIDC
+  provider, verified against the provider's published JWKS with cached keys,
+  a bounded key cache lifetime, and an algorithm allowlist that rejects
+  `alg: none`. Opaque-token introspection is explicitly out of scope for the
+  first release.
 - **FR-022**: The server MUST reject a token that is expired, malformed, or
   whose audience is not this server. Accepting a token minted for another
   resource is a defect, not a convenience.
@@ -293,8 +342,11 @@ resource succeeds.
 - **FR-025**: The server MUST apply per-caller limits on concurrent scans, and
   MUST refuse or queue past that limit with a clear message rather than
   degrading service for everyone.
-- **FR-026**: The server MUST record an audit entry per scan containing the
-  caller identity, target, resolved ref, scanners run, and outcome.
+- **FR-026**: The server MUST emit an audit entry per scan as structured JSON
+  on stdout or stderr, containing the caller identity, target, resolved ref,
+  scanners run, and outcome. The server MUST NOT persist these records itself
+  and MUST NOT implement retention, rotation, or a query interface —
+  collection and retention belong to the operator's existing log pipeline.
 
 ### Functional Requirements — Secret hygiene (cross-cutting)
 
@@ -309,6 +361,45 @@ resource succeeds.
   were not granted them.
 - **FR-030**: Tokens minted for a clone MUST be short-lived, and MUST be
   discarded with the workspace.
+
+### Functional Requirements — Authorization (hosted mode)
+
+These apply only when a caller identity exists, i.e. on the hosted transport.
+On stdio the caller is the operator and there is nobody to authorize.
+
+- **FR-031**: Before provisioning a workspace for a remote target, the system
+  MUST verify that the calling identity is authorized to read that repository,
+  using a credential or identity belonging to the caller.
+- **FR-032**: A server-held credential MUST NOT be used to reach a repository
+  until the caller's own authorization for that repository has been confirmed.
+  Authentication is not authorization: a caller proving who they are does not
+  entitle them to everything the server can reach.
+- **FR-033**: When the caller's authorization cannot be established, the
+  request MUST be refused without disclosing whether the repository exists.
+- **FR-034**: An authorization decision MAY be cached, but the cache MUST be
+  keyed by caller and repository and MUST expire, so that revoked access stops
+  working within a bounded time.
+- **FR-035**: Every authorization refusal MUST be recorded in the scan record
+  alongside successful scans, so that attempts to reach unauthorized
+  repositories are visible.
+
+### Functional Requirements — Observability
+
+- **FR-036**: The server MUST emit structured, levelled logs for its own
+  operation, distinct from scan audit records, and MUST NOT write anything to
+  stdout that would corrupt the stdio transport's protocol stream.
+- **FR-037**: The server MUST expose a Prometheus-format metrics endpoint when
+  the HTTP transport is enabled, covering at minimum: scans by terminal status,
+  scan and per-scanner durations, execution backend reachability, current
+  queue depth and in-flight executions, and per-caller rejections.
+- **FR-038**: Metric labels MUST NOT carry unbounded or sensitive values.
+  Repository names, target URLs, caller subjects, and file paths MUST NOT
+  appear as label values — they would both explode cardinality and publish
+  private repository names on an endpoint that is deliberately less protected
+  than the MCP surface.
+- **FR-039**: The metrics endpoint MUST NOT require an MCP token, but MUST be
+  bindable separately from the MCP endpoint so an operator can expose it only
+  to their scrape infrastructure.
 
 ### Key Entities
 
@@ -327,10 +418,12 @@ resource succeeds.
   applies — namespace, resource limits, scheduling constraints, pull secrets,
   concurrency ceiling.
 - **Caller Identity**: Who is making a request on the hosted transport, from a
-  validated token. Carries the subject, the limits that apply, and what goes
-  into the audit record.
+  validated token. Carries the subject, the limits that apply, what goes into
+  the audit record, and the means of checking what this caller may read — the
+  basis for every authorization decision.
 - **Scan Record**: The audit trail for one scan — caller, target, resolved
-  ref, scanners, outcome, timing.
+  ref, scanners, outcome, timing. Emitted as a structured log line; never
+  stored by this server.
 
 ## Success Criteria *(mandatory)*
 
@@ -360,6 +453,16 @@ resource succeeds.
 - **SC-009**: The default `cargo test` run remains hermetic — no Docker, no
   cluster, no network — and every new dependency-requiring test self-skips
   with a message when its dependency is unreachable.
+- **SC-010**: A caller who cannot read a private repository under their own
+  identity cannot cause the server to scan it, demonstrated by a test in which
+  a server-held credential *would* have granted access and the scan is still
+  refused.
+- **SC-011**: An operator can determine, from metrics alone and without reading
+  logs, how many scans succeeded, failed, and timed out, and whether the
+  execution backend is currently reachable.
+- **SC-012**: No metric label value contains a repository name, target URL,
+  caller subject, or file path, verified by a test that scrapes the endpoint
+  after a scan and asserts the target does not appear.
 
 ## Assumptions
 
@@ -367,8 +470,9 @@ resource succeeds.
   is off by default and enabled by explicit configuration.
 - Local-path scanning over stdio with the Docker backend remains the default
   and the most-used path. No change may regress it.
-- Identity is delegated to an existing external provider. This feature will not
-  store passwords or issue its own long-lived credentials.
+- Identity is delegated to an existing external provider that issues JWTs and
+  publishes a JWKS. This feature will not store passwords or issue its own
+  long-lived credentials.
 - Operators running the Kubernetes backend own the namespace, its quotas, and
   its network policy. The server configures its Jobs but does not create
   namespaces, RBAC, or policy on their behalf.
@@ -377,6 +481,9 @@ resource succeeds.
   the backend that produced it.
 - Git is available to the clone path, whether as a library or a binary in the
   clone container.
+- Operators already run a log collection pipeline. Audit records are
+  structured log lines; the server neither stores nor rotates them, and
+  retention policy is entirely the operator's.
 - A single deployment serves a team, not the public internet. Multi-tenancy
   means colleagues, and the isolation requirements are scoped to that.
 
@@ -384,10 +491,15 @@ resource succeeds.
 
 - Any web UI. This remains an MCP server.
 - Storing scan history, trend analysis, or a findings database. `Scan Record`
-  is an audit log entry, not a reporting product.
+  is a structured log line, not a reporting product. The server has no
+  persistent storage of any kind and offers no way to query past scans.
 - Writing fixes back to a repository, opening pull requests, or pushing
   commits. The workspace stays read-only, in every mode.
 - Autoscaling, sharding, or multi-cluster scheduling.
 - Acting as an OAuth *authorization* server, or any credential storage of our
   own.
+- Opaque-token introspection (RFC 7662), and therefore providers that do not
+  issue JWTs — notably GitHub as an identity provider. Deferred, not rejected:
+  the audience and scope checks are provider-independent, so adding it later
+  changes no contract.
 - Scanning anything other than a git repository or a local directory.
