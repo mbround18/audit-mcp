@@ -259,6 +259,17 @@ pub struct SuggestFixesResponse {
     pub suggestions: Vec<FixSuggestion>,
 }
 
+/// Which execution backend is active and whether it can be reached.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ExecutorStatus {
+    /// `docker` or `kubernetes`.
+    pub backend: String,
+    pub available: bool,
+    /// Why it is unavailable, when it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct LanguageToolProfile {
     pub language: String,

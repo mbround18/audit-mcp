@@ -14,10 +14,11 @@ use crate::{
     explain::FindingExplainer,
     fixes::FixEngine,
     models::{
-        FindingExplanation, ListScannersResponse, NormalizedFinding, RunScanResponse, RunStatus,
-        ScanSummary, ScannerRunResult, Severity, SuggestFixesResponse, ToolSelectionPlan,
+        ExecutorStatus, FindingExplanation, ListScannersResponse, NormalizedFinding,
+        RunScanResponse, RunStatus, ScanSummary, ScannerRunResult, Severity, SuggestFixesResponse,
+        ToolSelectionPlan,
     },
-    runner::{DockerScannerRunner, ScanOptions},
+    runner::{ScanOptions, ScanRunner},
     scanners::ScannerRegistry,
     selection::ToolSelector,
 };
@@ -82,7 +83,13 @@ pub struct SuggestFixesRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct AuditStatusResponse {
-    /// Whether a Docker daemon is reachable right now. Scans require one.
+    /// The active execution backend and whether it is reachable.
+    pub executor: ExecutorStatus,
+    /// Whether the active backend is reachable right now. Scans require it.
+    ///
+    /// Retained under its original name so existing callers keep working; new
+    /// callers should read `executor` instead, which also says *which* backend
+    /// the answer is about.
     pub docker_available: bool,
     pub scanner_count: usize,
     /// Scanners whose output is normalized into structured findings.
@@ -95,7 +102,7 @@ pub struct AuditStatusResponse {
 pub struct AuditMcpServer {
     tool_router: ToolRouter<Self>,
     registry: Arc<ScannerRegistry>,
-    runner: Arc<DockerScannerRunner>,
+    runner: ScanRunner,
     explainer: Arc<FindingExplainer>,
     fixer: Arc<FixEngine>,
     selector: Arc<ToolSelector>,
@@ -108,7 +115,7 @@ impl AuditMcpServer {
         Ok(Self {
             tool_router: Self::tool_router(),
             registry: Arc::new(ScannerRegistry::new()?),
-            runner: Arc::new(DockerScannerRunner::new()),
+            runner: ScanRunner::docker(),
             explainer: Arc::new(FindingExplainer::new()),
             fixer: Arc::new(FixEngine::new()),
             selector: Arc::new(ToolSelector::new()),
@@ -141,16 +148,17 @@ impl AuditMcpServer {
         description = "Report whether Docker is reachable and how much of the scanner catalog produces normalized findings."
     )]
     pub async fn audit_status(&self) -> Json<AuditStatusResponse> {
-        let docker_available = self.runner.is_available().await;
+        let backend = self.runner.backend();
+        let available = self.runner.is_available().await;
+        let docker_available = available;
         let summaries = self.registry.list_summaries();
         let normalized_scanner_count = summaries.iter().filter(|entry| entry.normalized).count();
 
         let mut notes = Vec::new();
-        if !docker_available {
-            notes.push(
-                "No Docker daemon is reachable; run_scan will fail until one is available. list_scanners and explain_finding still work."
-                    .to_string(),
-            );
+        if !available {
+            notes.push(format!(
+                "The '{backend}' execution backend is not reachable; run_scan will fail until it is. list_scanners and explain_finding still work."
+            ));
         }
         notes.push(format!(
             "{normalized_scanner_count} of {} scanners emit structured findings; the rest return raw logs with status 'unparsed'.",
@@ -158,6 +166,13 @@ impl AuditMcpServer {
         ));
 
         Json(AuditStatusResponse {
+            executor: ExecutorStatus {
+                backend: backend.to_string(),
+                available,
+                detail: (!available).then(|| {
+                    format!("the '{backend}' backend did not respond to a reachability check")
+                }),
+            },
             docker_available,
             scanner_count: summaries.len(),
             normalized_scanner_count,
@@ -180,10 +195,10 @@ impl AuditMcpServer {
 
         // One preflight beats N identical per-scanner failures.
         if !self.runner.is_available().await {
-            return Err(
-                "no Docker daemon is reachable, so no scanner can run. Start Docker and retry; call audit_status to re-check."
-                    .to_string(),
-            );
+            return Err(format!(
+                "the '{}' execution backend is not reachable, so no scanner can run. Start it and retry; call audit_status to re-check.",
+                self.runner.backend()
+            ));
         }
 
         let options = ScanOptions {

@@ -5,11 +5,32 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.102"
+axum = { version = "0.8.9", optional = true }
 bollard = "0.21.0"
 futures-util = "0.3.32"
+jsonwebtoken = { version = "11.0.0", optional = true }
+k8s-openapi = { version = "0.28.0", features = ["latest"], optional = true }
+kube = { version = "4.2.0", default-features = false, features = ["client", "rustls-tls", "runtime", "derive"], optional = true }
+prometheus = { version = "0.14.0", default-features = false, optional = true }
+reqwest = { version = "0.12.28", default-features = false, features = ["charset", "http2", "json", "rustls-tls"] }
 rmcp = { version = "1.7.0", features = ["transport-io"] }
 schemars = "1.2.1"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
+tempfile = "3.27.0"
 tokio = { version = "1.52.3", features = ["macros", "rt-multi-thread", "sync", "time"] }
 uuid = { version = "1.23.1", features = ["v4"] }
+
+[features]
+# Both off by default: a default build is stdio + Docker and gains none of the
+# dependencies below, which is the cheapest structural defence for SC-001.
+default = []
+# Run scanners as Kubernetes Jobs instead of local Docker containers.
+kubernetes = ["dep:kube", "dep:k8s-openapi"]
+# Serve MCP over authenticated streamable HTTP alongside stdio.
+http = [
+    "dep:axum",
+    "dep:jsonwebtoken",
+    "dep:prometheus",
+    "rmcp/transport-streamable-http-server",
+]

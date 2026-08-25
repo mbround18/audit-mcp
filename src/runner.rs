@@ -1,38 +1,26 @@
-use std::{env, path::PathBuf, time::Duration, time::Instant};
+//! Scan orchestration: turning one execution into one normalized result.
+//!
+//! This module owns everything that decides what a scan *means* — which
+//! environment a scanner may see, how long it may run, how its output is
+//! parsed, and which [`RunStatus`] its exit code earns. It owns none of the
+//! machinery for actually running a container; that is an
+//! [`Executor`](crate::executor::Executor).
+//!
+//! The split matters: if each backend decided its own statuses, "clean" would
+//! come to mean something subtly different in each one, which is precisely the
+//! failure this project exists to prevent.
 
-use bollard::container::LogOutput;
-use bollard::{
-    Docker,
-    errors::Error as BollardError,
-    models::{ContainerCreateBody, HostConfig},
-    query_parameters::{
-        CreateContainerOptionsBuilder, CreateImageOptionsBuilder, KillContainerOptionsBuilder,
-        LogsOptionsBuilder, RemoveContainerOptionsBuilder,
-    },
-};
-use futures_util::{StreamExt, TryStreamExt};
-use tokio::sync::OnceCell;
+use std::{env, path::PathBuf, sync::Arc, time::Duration};
+
 use uuid::Uuid;
 
+use crate::executor::{ExecutionRequest, Executor, Termination, docker::DockerExecutor};
 use crate::models::{RunStatus, ScanExecution, ScannerDefinition, ScannerRunResult};
 use crate::parsers::{self, ParseContext};
 use crate::scanners::DEFAULT_TIMEOUT_SECS;
 
-/// Hard ceiling on captured container output, so a runaway scanner cannot
-/// exhaust memory. Parsers see the full buffer up to this size.
-const MAX_LOG_BYTES: usize = 8 * 1024 * 1024;
 /// How much of the log stream is echoed back to the MCP client.
 const LOG_EXCERPT_CHARS: usize = 24_000;
-/// Memory ceiling per scanner container. Compilation is memory-hungry but
-/// should not be unbounded.
-const CONTAINER_MEMORY_BYTES: i64 = 4 * 1024 * 1024 * 1024;
-
-/// Container output, with stdout kept separate from the interleaved view.
-#[derive(Debug, Default)]
-struct ContainerOutput {
-    stdout: String,
-    combined: String,
-}
 
 /// Per-run knobs supplied by the caller.
 #[derive(Debug, Clone, Default)]
@@ -43,41 +31,32 @@ pub struct ScanOptions {
     pub include_raw_logs: bool,
 }
 
-/// Runs scanners in ephemeral Docker containers.
-///
-/// The Docker client is connected lazily so the MCP server starts (and can
-/// answer `list_scanners`/`explain_finding`) even with no daemon running.
-#[derive(Debug, Default)]
-pub struct DockerScannerRunner {
-    docker: OnceCell<Docker>,
+/// Runs scanners through an execution backend and normalizes what comes back.
+#[derive(Debug, Clone)]
+pub struct ScanRunner {
+    executor: Arc<dyn Executor>,
 }
 
-impl DockerScannerRunner {
-    pub fn new() -> Self {
+impl ScanRunner {
+    /// The default backend: local Docker containers.
+    pub fn docker() -> Self {
         Self {
-            docker: OnceCell::new(),
+            executor: Arc::new(DockerExecutor::new()),
         }
     }
 
-    /// Connect and ping on first use. Failures are not cached, so a daemon
-    /// that starts later is picked up on the next scan.
-    async fn client(&self) -> Result<&Docker, String> {
-        self.docker
-            .get_or_try_init(|| async {
-                let docker = Docker::connect_with_local_defaults()
-                    .map_err(|err| format!("failed to create Docker client: {err}"))?;
-                docker
-                    .ping()
-                    .await
-                    .map_err(|err| format!("Docker daemon is not reachable: {err}"))?;
-                Ok(docker)
-            })
-            .await
+    pub fn with_executor(executor: Arc<dyn Executor>) -> Self {
+        Self { executor }
     }
 
-    /// True when a Docker daemon is reachable right now.
+    /// Which backend is in use, for reporting.
+    pub fn backend(&self) -> &'static str {
+        self.executor.name()
+    }
+
+    /// Whether the backend's infrastructure is reachable right now.
     pub async fn is_available(&self) -> bool {
-        self.client().await.is_ok()
+        self.executor.is_available().await
     }
 
     pub async fn run_scan(
@@ -113,158 +92,52 @@ impl DockerScannerRunner {
 
         // Credentials are checked before anything expensive happens, and a
         // missing token is a skip rather than a failure so `mode=all` stays quiet.
-        let auth_env = match build_scanner_auth_env(&scanner.name) {
+        let environment = match build_scanner_auth_env(&scanner.name) {
             Ok(env) => env,
             Err(missing) => return Ok(ScannerRunResult::skipped(&scanner.name, missing)),
         };
 
-        let docker = self.client().await?;
         let mount = resolve_target(target)?;
-
-        let resolved_image = resolve_image_for_pull(&scanner.image);
-        self.ensure_image_available(docker, &resolved_image).await?;
-
-        let run_id = format!("run-{}", Uuid::new_v4());
-        let container_name = format!("audit-scan-{}", Uuid::new_v4());
-        let raw_command = scanner
-            .command_template
-            .iter()
-            .map(|entry| entry.replace("{target}", &mount.container_target))
-            .collect::<Vec<_>>();
-
-        // Wrap in `sh -c` when an install script is present so the tool exists
-        // by the time the main command runs.
-        let command = match &scanner.install_script {
-            Some(setup) => {
-                let main_cmd = shell_script_for(&raw_command);
-                vec![
-                    "sh".to_string(),
-                    "-c".to_string(),
-                    format!("{setup} && {main_cmd}"),
-                ]
-            }
-            None => raw_command,
-        };
-
-        let cache = image_cache_config(&resolved_image, &scanner.name);
-        let mut container_env = cache.env;
-        container_env.extend(auth_env);
-        let mut binds = vec![format!("{}:/workspace:ro", mount.host_dir.display())];
-        binds.extend(cache.volumes);
-
-        let create_response = docker
-            .create_container(
-                Some(
-                    CreateContainerOptionsBuilder::new()
-                        .name(&container_name)
-                        .build(),
-                ),
-                ContainerCreateBody {
-                    image: Some(resolved_image.clone()),
-                    // Clear the image's ENTRYPOINT so `command` is always the
-                    // literal argv. Many scanner images set the tool itself as
-                    // the entrypoint, which would otherwise swallow the command
-                    // template (`gitleaks` + `["gitleaks","detect"]` becomes
-                    // `gitleaks gitleaks detect`) or pass `sh -c ...` to the
-                    // tool as arguments.
-                    entrypoint: Some(vec![]),
-                    cmd: Some(command.clone()),
-                    working_dir: Some("/workspace".to_string()),
-                    attach_stdout: Some(true),
-                    attach_stderr: Some(true),
-                    env: Some(container_env),
-                    host_config: Some(HostConfig {
-                        binds: Some(binds),
-                        auto_remove: Some(false),
-                        // Prevent privilege escalation inside the container.
-                        security_opt: Some(vec!["no-new-privileges:true".to_string()]),
-                        // Scanners are analysis tools, not system daemons.
-                        cap_drop: Some(vec!["ALL".to_string()]),
-                        // ...with one exception. Dropping every capability
-                        // also drops CAP_DAC_READ_SEARCH, so root inside the
-                        // container cannot read a directory the host owns with
-                        // mode 0700 — a build output or cache directory is
-                        // enough to make a whole scan fail with "permission
-                        // denied". Restoring only the read-side capability lets
-                        // scanners read the tree the caller explicitly asked
-                        // them to scan. It grants no write access (the mount is
-                        // read-only) and no path to privilege escalation.
-                        cap_add: Some(vec!["DAC_READ_SEARCH".to_string()]),
-                        memory: Some(CONTAINER_MEMORY_BYTES),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                },
-            )
-            .await
-            .map_err(|err| {
-                format!("failed to create scanner container '{container_name}': {err}")
-            })?;
-
-        let container_id = create_response.id;
-        let started = Instant::now();
-
-        // Set up the wait stream BEFORE starting so we don't miss the exit
-        // event if the container finishes before the next await point.
-        let mut wait_stream = docker.wait_container(&container_id, None);
-
-        if let Err(err) = docker.start_container(&container_id, None).await {
-            self.cleanup_container(docker, &container_id).await;
-            return Err(format!(
-                "failed to start scanner container '{container_id}': {err}"
-            ));
-        }
-
+        let command = build_command(scanner, &mount.container_target);
         let timeout = options
             .timeout
             .or_else(|| scanner.timeout_secs.map(Duration::from_secs))
             .unwrap_or_else(|| Duration::from_secs(DEFAULT_TIMEOUT_SECS));
 
-        let wait_result = match tokio::time::timeout(timeout, wait_stream.next()).await {
-            Ok(Some(Ok(result))) => Ok(result),
-            // Docker surfaces non-zero container exits as DockerContainerWaitError.
-            // Convert to a synthetic response so the exit code reaches our logic.
-            Ok(Some(Err(BollardError::DockerContainerWaitError { code, .. }))) => {
-                Ok(bollard::models::ContainerWaitResponse {
-                    status_code: code,
-                    error: None,
-                })
-            }
-            Ok(Some(Err(err))) => Err(format!(
-                "failed while waiting for scanner container '{container_id}': {err}"
-            )),
-            Ok(None) => Err(format!(
-                "scanner container '{container_id}' exited without a wait result"
-            )),
-            Err(_elapsed) => {
-                // Kill first so the logs we collect reflect work actually done.
-                let _ = docker
-                    .kill_container(
-                        &container_id,
-                        Some(KillContainerOptionsBuilder::new().signal("SIGKILL").build()),
-                    )
-                    .await;
-                let logs = self
-                    .collect_logs(docker, &container_id)
-                    .await
-                    .map(|output| output.combined);
-                self.cleanup_container(docker, &container_id).await;
+        let run_id = format!("run-{}", Uuid::new_v4());
+        let outcome = self
+            .executor
+            .execute(ExecutionRequest {
+                scanner,
+                workspace: mount.host_dir,
+                command: command.clone(),
+                environment,
+                timeout,
+            })
+            .await?;
 
+        let duration_ms = outcome.duration.as_millis() as u64;
+        let excerpt = trim_for_payload(&outcome.combined, LOG_EXCERPT_CHARS);
+
+        // An execution the environment killed or never completed is reported
+        // with the backend's own words, never as a clean scan.
+        match &outcome.termination {
+            Termination::TimedOut => {
                 return Ok(ScannerRunResult {
                     scanner: scanner.name.clone(),
                     status: RunStatus::Timeout,
                     execution: Some(ScanExecution {
                         run_id,
-                        image: resolved_image,
+                        image: outcome.image,
                         command,
                         status: "timeout".to_string(),
                         exit_code: None,
-                        duration_ms: started.elapsed().as_millis() as u64,
+                        duration_ms,
                         notes: format!(
                             "Killed after exceeding the {}s budget for this scanner.",
                             timeout.as_secs()
                         ),
-                        logs: logs.map(|logs| trim_for_payload(&logs, LOG_EXCERPT_CHARS)),
+                        logs: Some(excerpt),
                     }),
                     findings: vec![],
                     error: Some(format!(
@@ -274,38 +147,38 @@ impl DockerScannerRunner {
                     )),
                 });
             }
-        };
-
-        let wait_result = match wait_result {
-            Ok(result) => result,
-            Err(error) => {
-                self.cleanup_container(docker, &container_id).await;
-                return Err(error);
+            Termination::Infrastructure(reason) => {
+                return Ok(ScannerRunResult {
+                    scanner: scanner.name.clone(),
+                    status: RunStatus::ToolError,
+                    execution: Some(ScanExecution {
+                        run_id,
+                        image: outcome.image,
+                        command,
+                        status: "tool_error".to_string(),
+                        exit_code: outcome.exit_code,
+                        duration_ms,
+                        notes: format!("Execution environment failed the run: {reason}"),
+                        logs: Some(excerpt),
+                    }),
+                    findings: vec![],
+                    error: Some(format!(
+                        "scanner '{}' could not run: {reason}",
+                        scanner.name
+                    )),
+                });
             }
-        };
+            Termination::Completed => {}
+        }
 
-        let output = match self.collect_logs(docker, &container_id).await {
-            Some(output) => output,
-            None => {
-                self.cleanup_container(docker, &container_id).await;
-                return Err(format!(
-                    "failed to read logs from scanner container '{container_id}'"
-                ));
-            }
-        };
-
-        self.cleanup_container(docker, &container_id).await;
-
-        let exit_code = wait_result.status_code;
-        let duration_ms = started.elapsed().as_millis() as u64;
-        let excerpt = trim_for_payload(&output.combined, LOG_EXCERPT_CHARS);
+        let exit_code = outcome.exit_code.unwrap_or_default();
 
         // Parse the FULL buffer — truncating first would shred any real
         // JSON/SARIF report. Try the clean stdout stream first; fall back to
         // the merged stream for tools that report on stderr.
         let ctx = ParseContext::new(scanner, target);
-        let parsed =
-            parsers::parse(&ctx, &output.stdout).or_else(|| parsers::parse(&ctx, &output.combined));
+        let parsed = parsers::parse(&ctx, &outcome.stdout)
+            .or_else(|| parsers::parse(&ctx, &outcome.combined));
         let recognized_output = parsed.is_some();
         let findings = parsed.unwrap_or_default();
 
@@ -357,7 +230,7 @@ impl DockerScannerRunner {
             status,
             execution: Some(ScanExecution {
                 run_id,
-                image: resolved_image,
+                image: outcome.image,
                 command,
                 status: status.as_str().to_string(),
                 exit_code: Some(exit_code),
@@ -369,86 +242,32 @@ impl DockerScannerRunner {
             error,
         })
     }
+}
 
-    /// Collect container output, keeping stdout separate from the merged view.
-    ///
-    /// Docker interleaves the two streams, which corrupts a report written to
-    /// stdout the moment the tool (or `go run`) writes a line to stderr —
-    /// gosec's SARIF arrives with `exit status 1` spliced in before its
-    /// closing brace. Parsers get the clean stdout stream; humans get the
-    /// merged one.
-    async fn collect_logs(&self, docker: &Docker, container_id: &str) -> Option<ContainerOutput> {
-        let chunks = docker
-            .logs(
-                container_id,
-                Some(
-                    LogsOptionsBuilder::new()
-                        .stdout(true)
-                        .stderr(true)
-                        .follow(false)
-                        .tail("all")
-                        .build(),
-                ),
-            )
-            .try_collect::<Vec<_>>()
-            .await
-            .ok()?;
+/// Resolve `{target}` and splice in any install script, producing the argv the
+/// backend will run verbatim.
+fn build_command(scanner: &ScannerDefinition, container_target: &str) -> Vec<String> {
+    let raw_command = scanner
+        .command_template
+        .iter()
+        .map(|entry| entry.replace("{target}", container_target))
+        .collect::<Vec<_>>();
 
-        let mut output = ContainerOutput::default();
-        for chunk in chunks {
-            if output.combined.len() >= MAX_LOG_BYTES {
-                break;
-            }
-            let is_stdout = matches!(chunk, LogOutput::StdOut { .. });
-            let text = String::from_utf8_lossy(chunk.into_bytes().as_ref()).into_owned();
-            if is_stdout {
-                output.stdout.push_str(&text);
-            }
-            output.combined.push_str(&text);
+    // Wrap in `sh -c` when an install script is present so the tool exists
+    // by the time the main command runs.
+    match &scanner.install_script {
+        Some(setup) => {
+            let main_cmd = shell_script_for(&raw_command);
+            vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                format!("{setup} && {main_cmd}"),
+            ]
         }
-
-        Some(output)
-    }
-
-    async fn ensure_image_available(&self, docker: &Docker, image: &str) -> Result<(), String> {
-        if docker.inspect_image(image).await.is_ok() {
-            return Ok(());
-        }
-
-        docker
-            .create_image(
-                Some(
-                    CreateImageOptionsBuilder::default()
-                        .from_image(image)
-                        .build(),
-                ),
-                None,
-                None,
-            )
-            .try_collect::<Vec<_>>()
-            .await
-            .map_err(|err| format!("failed to pull scanner image '{image}': {err}"))?;
-
-        Ok(())
-    }
-
-    async fn cleanup_container(&self, docker: &Docker, container_id: &str) {
-        let _ = docker
-            .remove_container(
-                container_id,
-                Some(RemoveContainerOptionsBuilder::new().force(true).build()),
-            )
-            .await;
+        None => raw_command,
     }
 }
 
-/// Render a command template as a single shell script line, for splicing after
-/// an install script.
-///
-/// Most templates are already `["sh", "-c", "<script>"]`; naively joining those
-/// with spaces produces `sh -c cargo clippy --all-targets`, where the shell
-/// takes only `cargo` as the script and silently runs the wrong thing. Unwrap
-/// that form and reuse the script verbatim; quote anything else.
 fn shell_script_for(command: &[String]) -> String {
     if let [shell, flag, script] = command
         && (shell == "sh" || shell == "bash")
@@ -534,224 +353,6 @@ pub fn resolve_target(target: &str) -> Result<ResolvedTarget, String> {
         host_dir: parent,
         container_target: format!("./{file_name}"),
     })
-}
-
-fn resolve_image_for_pull(image: &str) -> String {
-    let registry = env::var("REGISTRY")
-        .ok()
-        .map(|value| value.trim().trim_end_matches('/').to_string())
-        .filter(|value| !value.is_empty());
-
-    let Some(registry) = registry else {
-        return image.to_string();
-    };
-
-    let mut segments = image.split('/');
-    let first = segments.next().unwrap_or_default();
-
-    if first == registry {
-        return image.to_string();
-    }
-
-    let remainder = if is_registry_component(first) {
-        segments.collect::<Vec<_>>().join("/")
-    } else {
-        image.to_string()
-    };
-
-    if remainder.is_empty() {
-        return image.to_string();
-    }
-
-    let normalized = if remainder.contains('/') {
-        remainder
-    } else {
-        format!("library/{remainder}")
-    };
-
-    format!("{registry}/{normalized}")
-}
-
-fn is_registry_component(component: &str) -> bool {
-    component == "localhost" || component.contains('.') || component.contains(':')
-}
-
-struct CacheConfig {
-    volumes: Vec<String>,
-    env: Vec<String>,
-}
-
-/// Returns the Docker named volumes and env vars needed to give a scanner
-/// container a shared, persistent cache.
-///
-/// Sharing strategy per ecosystem
-/// ───────────────────────────────
-/// Rust   audit-cargo-home (shared)      — registry index + installed binaries
-///        audit-target-<scanner> (solo)  — incremental build artifacts per scanner
-///                                         (scanners produce incompatible artifacts)
-///
-/// Go     audit-go-mod-cache (shared)    — content-addressed module downloads
-///        audit-go-build-cache (shared)  — build cache; Go uses per-entry locking
-///
-/// Node   audit-npm-cache (shared)       — npm tarball cache (content-addressed)
-///
-/// Python audit-uv-cache (shared)        — uv wheel/sdist download cache
-///        audit-uv-tools (shared)        — uvx tool installs (bandit, ruff, …)
-///
-/// Ruby   audit-gem-home (shared)        — installed gems; safe because all
-///                                         containers use the same base image
-///
-/// Java   audit-jbang-cache (shared)     — jbang script/jar cache
-///        audit-maven-repo (shared)      — Maven local repository
-///
-/// PHP    audit-composer-cache (shared)  — composer download cache
-///        audit-composer-home (shared)   — composer home (global vendor/bin)
-///
-/// .NET   audit-nuget-packages (shared)  — NuGet global packages folder
-///        audit-dotnet-home (shared)     — dotnet CLI home for global tools
-///
-/// IaC    audit-checkov-cache (shared)   — checkov policy/cache files
-///        audit-trivy-cache (shared)     — trivy vulnerability DB and cache
-fn image_cache_config(image: &str, scanner_name: &str) -> CacheConfig {
-    if image.contains("rust") {
-        CacheConfig {
-            volumes: vec![
-                "audit-cargo-home:/cache/cargo-home".to_string(),
-                format!("audit-target-{scanner_name}:/cache/cargo-target"),
-            ],
-            env: vec![
-                "CARGO_HOME=/cache/cargo-home".to_string(),
-                "CARGO_TARGET_DIR=/cache/cargo-target".to_string(),
-            ],
-        }
-    } else if image.contains("golang") || image.contains("go:") {
-        CacheConfig {
-            volumes: vec![
-                "audit-go-mod-cache:/cache/go-mod".to_string(),
-                "audit-go-build-cache:/cache/go-build".to_string(),
-            ],
-            env: vec![
-                "GOMODCACHE=/cache/go-mod".to_string(),
-                "GOCACHE=/cache/go-build".to_string(),
-                "GOPATH=/cache/go-mod".to_string(),
-                // `go run tool@latest` must not be blocked by a repo's vendor
-                // directory or a proxy-less environment.
-                "GOFLAGS=-mod=mod".to_string(),
-                // The golang image pins GOTOOLCHAIN=local, which makes every
-                // `go run tool@latest` fail as soon as the tool's go.mod
-                // requires a newer Go than the base image ships. `auto` lets
-                // Go fetch the toolchain the tool asks for.
-                "GOTOOLCHAIN=auto".to_string(),
-            ],
-        }
-    } else if image.contains("node") {
-        CacheConfig {
-            // npx (used by all node scanners) installs on demand into npm's
-            // own cache, so a single shared volume covers every scanner.
-            volumes: vec!["audit-npm-cache:/cache/npm".to_string()],
-            env: vec!["NPM_CONFIG_CACHE=/cache/npm".to_string()],
-        }
-    } else if image.contains("astral") || image.contains("uv") {
-        CacheConfig {
-            volumes: vec![
-                "audit-uv-cache:/cache/uv".to_string(),
-                // uvx installs tool environments here; shared = install once.
-                "audit-uv-tools:/cache/uv-tools".to_string(),
-            ],
-            env: vec![
-                "UV_CACHE_DIR=/cache/uv".to_string(),
-                "UV_TOOL_DIR=/cache/uv-tools".to_string(),
-            ],
-        }
-    } else if image.contains("ruby") {
-        CacheConfig {
-            volumes: vec!["audit-gem-home:/cache/gems".to_string()],
-            env: vec![
-                "GEM_HOME=/cache/gems".to_string(),
-                "GEM_PATH=/cache/gems".to_string(),
-            ],
-        }
-    } else if image.contains("jbang") {
-        CacheConfig {
-            volumes: vec![
-                "audit-jbang-cache:/cache/jbang".to_string(),
-                "audit-maven-repo:/cache/maven".to_string(),
-            ],
-            env: vec![
-                "JBANG_CACHE_DIR=/cache/jbang".to_string(),
-                "MAVEN_OPTS=-Dmaven.repo.local=/cache/maven".to_string(),
-            ],
-        }
-    } else if image.contains("composer") {
-        CacheConfig {
-            volumes: vec![
-                "audit-composer-cache:/cache/composer-cache".to_string(),
-                "audit-composer-home:/cache/composer-home".to_string(),
-            ],
-            env: vec![
-                "COMPOSER_CACHE_DIR=/cache/composer-cache".to_string(),
-                "COMPOSER_HOME=/cache/composer-home".to_string(),
-                // Global vendor binaries live under COMPOSER_HOME.
-                "PATH=/cache/composer-home/vendor/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string(),
-            ],
-        }
-    } else if image.contains("dotnet") {
-        CacheConfig {
-            volumes: vec![
-                "audit-nuget-packages:/cache/nuget".to_string(),
-                "audit-dotnet-home:/cache/dotnet-home".to_string(),
-            ],
-            env: vec![
-                "NUGET_PACKAGES=/cache/nuget".to_string(),
-                // Redirects global tool installs and CLI telemetry away from /root.
-                "DOTNET_CLI_HOME=/cache/dotnet-home".to_string(),
-                "HOME=/cache/dotnet-home".to_string(),
-                "DOTNET_CLI_TELEMETRY_OPTOUT=1".to_string(),
-                "PATH=/cache/dotnet-home/.dotnet/tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string(),
-            ],
-        }
-    } else if image.contains("bridgecrew/checkov") {
-        CacheConfig {
-            volumes: vec!["audit-checkov-cache:/cache/checkov".to_string()],
-            env: vec!["CHECKOV_CACHE_DIR=/cache/checkov".to_string()],
-        }
-    } else if image.contains("aquasec/trivy") {
-        CacheConfig {
-            volumes: vec!["audit-trivy-cache:/cache/trivy".to_string()],
-            env: vec!["TRIVY_CACHE_DIR=/cache/trivy".to_string()],
-        }
-    } else if image.contains("anchore/grype") {
-        CacheConfig {
-            volumes: vec!["audit-grype-db:/cache/grype".to_string()],
-            env: vec!["GRYPE_DB_CACHE_DIR=/cache/grype".to_string()],
-        }
-    } else if image.contains("osv-scanner") {
-        CacheConfig {
-            volumes: vec!["audit-osv-cache:/cache/osv".to_string()],
-            env: vec!["OSV_CACHE_DIR=/cache/osv".to_string()],
-        }
-    } else if image.contains("eclipse-temurin") {
-        CacheConfig {
-            volumes: vec!["audit-gradle-home:/cache/gradle".to_string()],
-            env: vec!["GRADLE_USER_HOME=/cache/gradle".to_string()],
-        }
-    } else if image.contains("elixir") {
-        CacheConfig {
-            volumes: vec![
-                "audit-hex-packages:/cache/hex".to_string(),
-                "audit-mix-build:/cache/mix".to_string(),
-            ],
-            env: vec![
-                "HEX_HOME=/cache/hex".to_string(),
-                "MIX_BUILD_PATH=/cache/mix".to_string(),
-            ],
-        }
-    } else {
-        CacheConfig {
-            volumes: vec![],
-            env: vec![],
-        }
-    }
 }
 
 fn trim_for_payload(text: &str, max_chars: usize) -> String {
@@ -843,11 +444,144 @@ where
 }
 
 #[cfg(test)]
+mod status_rules {
+    //! The status matrix, driven through a stub backend so it can be verified
+    //! with no Docker, no cluster, and no network. Before the executor was
+    //! extracted these rules could only be exercised by running a real
+    //! container, which is why they went wrong quietly for so long.
+
+    use std::sync::Arc;
+
+    use super::{ScanOptions, ScanRunner};
+    use crate::executor::stub::StubExecutor;
+    use crate::models::{OutputFormat, RunStatus, ScannerDefinition};
+
+    fn scanner(name: &str, format: OutputFormat, success: &[i64]) -> ScannerDefinition {
+        ScannerDefinition {
+            name: name.to_string(),
+            description: "test".to_string(),
+            image: "stub-image".to_string(),
+            categories: vec!["Test".to_string()],
+            command_template: vec!["run".to_string()],
+            install_script: None,
+            success_exit_codes: success.to_vec(),
+            output_format: format,
+            timeout_secs: Some(60),
+        }
+    }
+
+    async fn run_with(
+        executor: StubExecutor,
+        definition: &ScannerDefinition,
+    ) -> crate::models::ScannerRunResult {
+        let runner = ScanRunner::with_executor(Arc::new(executor));
+        // The repository root is a real directory, so target resolution succeeds
+        // without touching any backend.
+        runner
+            .run_scan(
+                definition,
+                env!("CARGO_MANIFEST_DIR"),
+                &ScanOptions::default(),
+            )
+            .await
+    }
+
+    const SHELLCHECK_JSON: &str = r#"[{"file":"./a.sh","line":3,"column":6,"level":"warning","code":2086,"message":"Double quote"}]"#;
+
+    #[tokio::test]
+    async fn parsed_findings_are_reported_as_findings() {
+        let definition = scanner("shellcheck", OutputFormat::Json, &[0, 1]);
+        let result = run_with(StubExecutor::completed(SHELLCHECK_JSON, 1), &definition).await;
+        assert_eq!(result.status, RunStatus::Findings);
+        assert_eq!(result.findings.len(), 1);
+        assert_eq!(result.findings[0].id, "SC2086");
+    }
+
+    #[tokio::test]
+    async fn a_recognized_empty_report_is_clean() {
+        let definition = scanner("shellcheck", OutputFormat::Json, &[0, 1]);
+        let result = run_with(StubExecutor::completed("[]", 0), &definition).await;
+        assert_eq!(result.status, RunStatus::Clean);
+        assert!(result.findings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn unrecognized_output_is_unparsed_not_clean() {
+        // The distinction that stops a silently broken scanner reporting a
+        // clean bill of health.
+        let definition = scanner("shellcheck", OutputFormat::Json, &[0, 1]);
+        let result = run_with(StubExecutor::completed("command not found", 0), &definition).await;
+        assert_eq!(result.status, RunStatus::Unparsed);
+        assert!(result.execution.unwrap().logs.is_some());
+    }
+
+    #[tokio::test]
+    async fn an_unexpected_exit_code_is_a_tool_error() {
+        let definition = scanner("shellcheck", OutputFormat::Json, &[0, 1]);
+        let result = run_with(StubExecutor::completed("boom", 127), &definition).await;
+        assert_eq!(result.status, RunStatus::ToolError);
+        assert!(result.error.unwrap().contains("127"));
+    }
+
+    #[tokio::test]
+    async fn findings_are_trusted_over_an_unexpected_exit_code() {
+        // xargs reports 123 whenever the tool it spawned exited non-zero. A
+        // scan that produced real findings ran, whatever it exited with.
+        let definition = scanner("shellcheck", OutputFormat::Json, &[0]);
+        let result = run_with(StubExecutor::completed(SHELLCHECK_JSON, 123), &definition).await;
+        assert_eq!(result.status, RunStatus::Findings);
+    }
+
+    #[tokio::test]
+    async fn a_text_scanner_is_always_unparsed() {
+        let definition = scanner("radon", OutputFormat::Text, &[0]);
+        let result = run_with(StubExecutor::completed("cc score 4", 0), &definition).await;
+        assert_eq!(result.status, RunStatus::Unparsed);
+    }
+
+    #[tokio::test]
+    async fn a_timeout_reports_timeout_and_keeps_partial_logs() {
+        let definition = scanner("shellcheck", OutputFormat::Json, &[0, 1]);
+        let result = run_with(StubExecutor::timed_out(), &definition).await;
+        assert_eq!(result.status, RunStatus::Timeout);
+        let execution = result
+            .execution
+            .expect("timed-out runs still report execution");
+        assert_eq!(execution.status, "timeout");
+        assert!(execution.exit_code.is_none());
+        assert!(execution.logs.unwrap().contains("partial output"));
+    }
+
+    #[tokio::test]
+    async fn an_infrastructure_failure_is_a_tool_error_carrying_the_reason() {
+        // An evicted pod or an OOM kill must never look like a clean scan.
+        let definition = scanner("shellcheck", OutputFormat::Json, &[0, 1]);
+        let result = run_with(StubExecutor::infrastructure("pod evicted"), &definition).await;
+        assert_eq!(result.status, RunStatus::ToolError);
+        assert!(result.error.unwrap().contains("pod evicted"));
+    }
+
+    #[tokio::test]
+    async fn a_missing_credential_skips_rather_than_fails() {
+        let definition = scanner("snyk", OutputFormat::Sarif, &[0, 1]);
+        let result = run_with(StubExecutor::completed("", 0), &definition).await;
+        assert_eq!(result.status, RunStatus::Skipped);
+        assert!(result.error.unwrap().contains("SNYK_TOKEN"));
+    }
+
+    #[tokio::test]
+    async fn the_backend_name_is_reported() {
+        let runner = ScanRunner::with_executor(Arc::new(StubExecutor::completed("", 0)));
+        assert_eq!(runner.backend(), "stub");
+        assert!(runner.is_available().await);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::{
         ScanOptions, build_scanner_auth_env, collect_allowlisted_env, required_env_for,
-        resolve_image_for_pull, resolve_target, scanner_auth_env_config, shell_quote,
-        shell_script_for, trim_for_payload,
+        resolve_target, scanner_auth_env_config, shell_quote, shell_script_for, trim_for_payload,
     };
 
     fn words(parts: &[&str]) -> Vec<String> {
@@ -907,12 +641,6 @@ mod tests {
         let error = resolve_target("/definitely/not/here").expect_err("should fail");
         assert!(error.contains("does not exist"));
         assert!(resolve_target("   ").is_err());
-    }
-
-    #[test]
-    fn registry_override_rewrites_image_references() {
-        // No REGISTRY set in the test environment: images pass through.
-        assert_eq!(resolve_image_for_pull("node:20-alpine"), "node:20-alpine");
     }
 
     #[test]

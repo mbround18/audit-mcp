@@ -12,7 +12,7 @@
 //! rule IDs, severities, and file locations — not on substrings of raw logs.
 
 use audit_mcp::models::{NormalizedFinding, OutputFormat, RunStatus, ScannerDefinition};
-use audit_mcp::runner::{DockerScannerRunner, ScanOptions};
+use audit_mcp::runner::{ScanOptions, ScanRunner};
 use audit_mcp::server::{AuditMcpServer, ExplainFindingRequest, RunScanMode, RunScanRequest};
 use bollard::Docker;
 use rmcp::handler::server::wrapper::Parameters;
@@ -297,7 +297,7 @@ async fn timeout_is_enforced_and_reported_as_a_timeout() {
         timeout_secs: Some(2),
     };
 
-    let runner = DockerScannerRunner::new();
+    let runner = ScanRunner::docker();
     let started = std::time::Instant::now();
     let result = runner
         .run_scan(&scanner, &fixture("multi"), &ScanOptions::default())

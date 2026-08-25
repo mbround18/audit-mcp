@@ -19,7 +19,7 @@
 //! nothing is a pass; being unable to run is not.
 
 use audit_mcp::models::{OutputFormat, RunStatus};
-use audit_mcp::runner::{DockerScannerRunner, ScanOptions};
+use audit_mcp::runner::{ScanOptions, ScanRunner};
 use audit_mcp::scanners::ScannerRegistry;
 use bollard::Docker;
 
@@ -83,7 +83,7 @@ fn fixture_for(scanner: &str) -> String {
 }
 
 /// Run one scanner and return a one-line verdict, or `None` when it ran fine.
-async fn check(runner: &DockerScannerRunner, scanner: &str) -> Option<String> {
+async fn check(runner: &ScanRunner, scanner: &str) -> Option<String> {
     let registry = ScannerRegistry::new().expect("registry");
     let definition = registry.get(scanner).expect("scanner in catalog").clone();
 
@@ -145,7 +145,7 @@ async fn run_tier(scanners: &[&str]) {
         return;
     }
 
-    let runner = DockerScannerRunner::new();
+    let runner = ScanRunner::docker();
     let mut failures = Vec::new();
     for scanner in scanners {
         if let Some(failure) = check(&runner, scanner).await {

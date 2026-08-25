@@ -35,12 +35,12 @@ Single Rust crate: `src/` and `tests/` at the repository root, per plan.md.
 **Purpose**: Make the new dependencies available without changing what a
 default build produces.
 
-- [ ] T001 Add `kubernetes` and `http` Cargo features (both off by default) to `Cargo.toml`, so the stdio+Docker default build gains no new dependencies — this is the first line of defence for SC-001
-- [ ] T002 Add feature-gated dependencies to `Cargo.toml`: `kube`/`k8s-openapi` under `kubernetes`; `axum`, `jsonwebtoken`, and a Prometheus exporter under `http`; `reqwest` and `tempfile` for the always-on clone path; enable `rmcp`'s `transport-streamable-http-server` under `http`
-- [ ] T003 [P] Create module skeletons with doc comments and no logic: `src/workspace/mod.rs`, `src/executor/mod.rs`, `src/config.rs`, `src/redact.rs`, `src/observe.rs`; register them in `src/lib.rs`
-- [ ] T004 [P] Add the new test binaries as empty, self-skipping stubs so CI wiring lands before the code: `tests/workspace_clone.rs`, `tests/executor_parity.rs`, `tests/secret_hygiene.rs`, `tests/http_auth.rs`
-- [ ] T005 [P] Create `.github/workflows/ci.yml` running `cargo test`, `cargo clippy -- -D warnings`, `cargo fmt --check`, and additionally `cargo build --all-features` and `cargo clippy --all-features -- -D warnings`, so a feature-gated module cannot rot unnoticed. The repository has no workflow today
-- [ ] T006 Verify `cargo build`, `cargo test`, `cargo clippy -- -D warnings`, and `cargo fmt --check` all pass with default features unchanged, and that the new test binaries **self-skip** rather than fail with no Docker, cluster, or network present (SC-009)
+- [X] T001 Add `kubernetes` and `http` Cargo features (both off by default) to `Cargo.toml`, so the stdio+Docker default build gains no new dependencies — this is the first line of defence for SC-001
+- [X] T002 Add feature-gated dependencies to `Cargo.toml`: `kube`/`k8s-openapi` under `kubernetes`; `axum`, `jsonwebtoken`, and a Prometheus exporter under `http`; `reqwest` and `tempfile` for the always-on clone path; enable `rmcp`'s `transport-streamable-http-server` under `http`
+- [X] T003 [P] Create module skeletons with doc comments and no logic: `src/workspace/mod.rs`, `src/executor/mod.rs`, `src/config.rs`, `src/redact.rs`, `src/observe.rs`; register them in `src/lib.rs`
+- [X] T004 [P] Add the new test binaries as empty, self-skipping stubs so CI wiring lands before the code: `tests/workspace_clone.rs`, `tests/executor_parity.rs`, `tests/secret_hygiene.rs`, `tests/http_auth.rs`
+- [X] T005 [P] Create `.github/workflows/ci.yml` running `cargo test`, `cargo clippy -- -D warnings`, `cargo fmt --check`, and additionally `cargo build --all-features` and `cargo clippy --all-features -- -D warnings`, so a feature-gated module cannot rot unnoticed. The repository has no workflow today
+- [X] T006 Verify `cargo build`, `cargo test`, `cargo clippy -- -D warnings`, and `cargo fmt --check` all pass with default features unchanged, and that the new test binaries **self-skip** rather than fail with no Docker, cluster, or network present (SC-009)
 
 ---
 
@@ -54,29 +54,29 @@ user-visible change**, and that is the point.
 
 ### Executor extraction (behaviour-preserving)
 
-- [ ] T007 Define `Executor`, `ExecutionRequest`, `ExecutionOutcome`, and `Termination` (Completed / TimedOut / Infrastructure) in `src/executor/mod.rs` per data-model.md; the outcome carries stdout, combined output, exit code, and duration — deliberately **no status and no findings**
-- [ ] T008 Move the container lifecycle out of `src/runner.rs` into `src/executor/docker.rs`: image pull, container create with entrypoint clearing and security options, start, wait, log collection with stdout kept separate, kill-on-timeout, and cleanup
-- [ ] T009 Rewrite `src/runner.rs` to call an `Executor` and retain everything else it owns today — parsing, `RunStatus` determination, the exit-code policy, the "parsed findings mean it ran" rule, and log attachment
-- [ ] T010 Wire the executor choice through `src/server.rs` so `run_scan` holds an `Arc<dyn Executor>` instead of a `DockerScannerRunner`
-- [ ] T011 [P] Add a unit test in `src/executor/mod.rs` asserting the trait is object-safe and that a stub executor drives `runner.rs`'s status rules with no Docker present
+- [X] T007 Define `Executor`, `ExecutionRequest`, `ExecutionOutcome`, and `Termination` (Completed / TimedOut / Infrastructure) in `src/executor/mod.rs` per data-model.md; the outcome carries stdout, combined output, exit code, and duration — deliberately **no status and no findings**
+- [X] T008 Move the container lifecycle out of `src/runner.rs` into `src/executor/docker.rs`: image pull, container create with entrypoint clearing and security options, start, wait, log collection with stdout kept separate, kill-on-timeout, and cleanup
+- [X] T009 Rewrite `src/runner.rs` to call an `Executor` and retain everything else it owns today — parsing, `RunStatus` determination, the exit-code policy, the "parsed findings mean it ran" rule, and log attachment
+- [X] T010 Wire the executor choice through `src/server.rs` so `run_scan` holds an `Arc<dyn Executor>` instead of a `DockerScannerRunner`
+- [X] T011 [P] Add a unit test in `src/executor/mod.rs` asserting the trait is object-safe and that a stub executor drives `runner.rs`'s status rules with no Docker present
 
 ### Configuration and startup validation
 
-- [ ] T012 [P] Implement configuration loading in `src/config.rs` for every variable in contracts/configuration.md, with documented defaults
-- [ ] T013 [P] Implement startup validation in `src/config.rs`: reject `AUDIT_TRANSPORT=http` without `AUDIT_RESOURCE_URL` or `AUDIT_OAUTH_ISSUER`, reject a partial `GITHUB_APP_*` set, reject an unknown `AUDIT_EXECUTOR`. An incoherent configuration must fail at the door, unlike an unreachable dependency
-- [ ] T014 [P] Unit-test the configuration matrix in `src/config.rs`, including that an empty environment yields today's defaults exactly
+- [X] T012 [P] Implement configuration loading in `src/config.rs` for every variable in contracts/configuration.md, with documented defaults
+- [X] T013 [P] Implement startup validation in `src/config.rs`: reject `AUDIT_TRANSPORT=http` without `AUDIT_RESOURCE_URL` or `AUDIT_OAUTH_ISSUER`, reject a partial `GITHUB_APP_*` set, reject an unknown `AUDIT_EXECUTOR`. An incoherent configuration must fail at the door, unlike an unreachable dependency
+- [X] T014 [P] Unit-test the configuration matrix in `src/config.rs`, including that an empty environment yields today's defaults exactly
 
 ### Cross-cutting infrastructure
 
-- [ ] T015 [P] Implement the redaction boundary in `src/redact.rs`: a registry of known secret values and a pass applied to any captured text before it can become a response field. Register no secrets yet — seeding is US1's job
-- [ ] T016 [P] Unit-test `src/redact.rs` for overlapping secrets, secrets spanning a truncation boundary, and the empty-registry no-op case
-- [ ] T017 [P] Implement structured levelled logging in `src/observe.rs`, writing to **stderr** on the stdio transport — stdout carries the JSON-RPC stream and must not be shared (FR-036)
-- [ ] T018 Extend `AuditStatusResponse` in `src/models.rs` and `src/server.rs` with the active backend and its reachability (FR-017), keeping the existing fields untouched
+- [X] T015 [P] Implement the redaction boundary in `src/redact.rs`: a registry of known secret values and a pass applied to any captured text before it can become a response field. Register no secrets yet — seeding is US1's job
+- [X] T016 [P] Unit-test `src/redact.rs` for overlapping secrets, secrets spanning a truncation boundary, and the empty-registry no-op case
+- [X] T017 [P] Implement structured levelled logging in `src/observe.rs`, writing to **stderr** on the stdio transport — stdout carries the JSON-RPC stream and must not be shared (FR-036)
+- [X] T018 Extend `AuditStatusResponse` in `src/models.rs` and `src/server.rs` with the active backend and its reachability (FR-017), keeping the existing fields untouched
 
 ### Regression gate
 
-- [ ] T019 Run the full existing verification: `cargo test`, then `cargo test --test e2e_scan -- --ignored`, then all six tiers of `cargo test --test scanner_smoke -- --ignored`
-- [ ] T020 Confirm behaviour preservation against the pre-refactor baseline: all 33 structured scanners still produce the same statuses and finding counts, and no field of `RunScanResponse` in `src/models.rs` changed shape
+- [X] T019 Run the full existing verification: `cargo test`, then `cargo test --test e2e_scan -- --ignored`, then all six tiers of `cargo test --test scanner_smoke -- --ignored`
+- [X] T020 Confirm behaviour preservation against the pre-refactor baseline: all 33 structured scanners still produce the same statuses and finding counts, and no field of `RunScanResponse` in `src/models.rs` changed shape
 
 **Checkpoint**: Foundation ready. US1, US2, and US3 can now proceed independently.
 
