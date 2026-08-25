@@ -354,7 +354,17 @@ async fn scans_a_repository_that_was_never_checked_out() {
 
     let workspace = &response.0.workspace;
     assert_eq!(workspace.origin, "git_https");
-    assert_eq!(workspace.credential_source.as_deref(), Some("anonymous"));
+    // Which credential was used depends on the host — a machine with a
+    // logged-in `gh` borrows its token. What matters is that the source is
+    // reported by name, and that a name is all it ever is.
+    let source = workspace
+        .credential_source
+        .as_deref()
+        .expect("a cloned scan reports which credential it used");
+    assert!(
+        ["anonymous", "gh_cli", "token", "github_app"].contains(&source),
+        "unexpected credential source: {source}"
+    );
     let resolved = workspace
         .resolved_ref
         .as_deref()

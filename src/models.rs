@@ -291,6 +291,18 @@ pub struct WorkspaceStatus {
     pub credential_sources: Vec<String>,
 }
 
+/// How MCP is being served.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TransportStatus {
+    /// `stdio` or `http`.
+    pub kind: String,
+    /// `none` on stdio — there is nobody to log in — or `oauth2`.
+    pub authentication: String,
+    /// Whether repository targets can be scanned on this transport. False on
+    /// the hosted transport until per-caller authorization is enforced.
+    pub remote_targets_supported: bool,
+}
+
 /// Which execution backend is active and whether it can be reached.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ExecutorStatus {

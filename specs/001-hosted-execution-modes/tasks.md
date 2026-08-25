@@ -178,34 +178,34 @@ starting T071.
 
 ### Tests for User Story 3 ⚠️
 
-- [ ] T060 [P] [US3] Write `tests/http_auth.rs` (`#[ignore]`): unauthenticated request returns 401 with a `WWW-Authenticate` challenge naming the resource metadata URL
-- [ ] T061 [P] [US3] Add rejection cases to `tests/http_auth.rs`: malformed token, expired token, wrong issuer, and `alg: none` — each a 401 with no indication of which check failed
-- [ ] T062 [P] [US3] Add the audience test to `tests/http_auth.rs`: a valid token minted by the same issuer for a **different** resource must be rejected (SC-006). This is the defect a hand-rolled resource server most often ships
+- [X] T060 [P] [US3] Write `tests/http_auth.rs` (`#[ignore]`): unauthenticated request returns 401 with a `WWW-Authenticate` challenge naming the resource metadata URL
+- [X] T061 [P] [US3] Add rejection cases to `tests/http_auth.rs`: malformed token, expired token, wrong issuer, and `alg: none` — each a 401 with no indication of which check failed
+- [X] T062 [P] [US3] Add the audience test to `tests/http_auth.rs`: a valid token minted by the same issuer for a **different** resource must be rejected (SC-006). This is the defect a hand-rolled resource server most often ships
 - [ ] T063 [P] [US3] Add an authorization test to `tests/http_auth.rs` asserting that a caller who cannot read a private repository cannot cause the server to scan it, even when a server-held credential would have granted access (SC-010)
 - [ ] T064 [P] [US3] Add a metrics leakage test to `tests/secret_hygiene.rs` asserting no label value scraped after a scan contains a repository name, target URL, caller subject, or file path (SC-012)
 - [ ] T065 [P] [US3] Add an isolation test to `tests/http_auth.rs`: two identities scanning concurrently, neither response containing the other's target, findings, or workspace (FR-024)
 
 ### Implementation for User Story 3
 
-- [ ] T066 [US3] Build the axum application in `src/http/mod.rs`, mounting `rmcp`'s `StreamableHttpService` as a tower service at `/mcp` (verified available in research.md R1)
-- [ ] T067 [P] [US3] Serve the RFC 9728 protected resource metadata document at `/.well-known/oauth-protected-resource` from `src/http/metadata.rs`, unauthenticated
-- [ ] T068 [US3] Implement the authentication layer in `src/http/auth.rs`: `WWW-Authenticate` challenge on unauthenticated requests, JWKS fetch with a bounded cache and key rotation handling, and an algorithm allowlist that rejects `alg: none`
-- [ ] T069 [US3] Implement full token validation in `src/http/auth.rs` — `iss`, `exp`, `nbf`, signature — and **audience against `AUDIT_RESOURCE_URL`**, which is not optional and not a formality (FR-022)
-- [ ] T070 [US3] Implement scope checking in `src/http/auth.rs`, returning 403 rather than 401 when a valid token lacks the required scope
-- [ ] T071 [US3] Implement per-caller repository authorization in `src/http/authz.rs`: confirm the calling identity can itself read the target before any server-held credential touches it (FR-031, FR-032)
-- [ ] T072 [US3] Implement the authorization decision cache in `src/http/authz.rs`, keyed by caller and repository with a bounded lifetime so revoked access stops working promptly (FR-034)
-- [ ] T073 [US3] Refuse unauthorized targets in `src/http/authz.rs` without disclosing whether the repository exists (FR-033)
+- [X] T066 [US3] Build the axum application in `src/http/mod.rs`, mounting `rmcp`'s `StreamableHttpService` as a tower service at `/mcp` (verified available in research.md R1)
+- [X] T067 [P] [US3] Serve the RFC 9728 protected resource metadata document at `/.well-known/oauth-protected-resource` from `src/http/metadata.rs`, unauthenticated
+- [X] T068 [US3] Implement the authentication layer in `src/http/auth.rs`: `WWW-Authenticate` challenge on unauthenticated requests, JWKS fetch with a bounded cache and key rotation handling, and an algorithm allowlist that rejects `alg: none`
+- [X] T069 [US3] Implement full token validation in `src/http/auth.rs` — `iss`, `exp`, `nbf`, signature — and **audience against `AUDIT_RESOURCE_URL`**, which is not optional and not a formality (FR-022)
+- [X] T070 [US3] Implement scope checking in `src/http/auth.rs`, returning 403 rather than 401 when a valid token lacks the required scope
+- [X] T071 [US3] Implement per-caller repository authorization in `src/http/authz.rs`: confirm the calling identity can itself read the target before any server-held credential touches it (FR-031, FR-032)
+- [X] T072 [US3] Implement the authorization decision cache in `src/http/authz.rs`, keyed by caller and repository with a bounded lifetime so revoked access stops working promptly (FR-034)
+- [X] T073 [US3] Refuse unauthorized targets in `src/http/authz.rs` without disclosing whether the repository exists (FR-033)
 - [ ] T074 [US3] Scope every scan to its caller in `src/http/mod.rs`: workspace, credentials, findings, and in-flight state keyed by caller identity, so no request can observe or reuse another caller's scan context (FR-024)
 - [ ] T075 [P] [US3] Implement per-caller concurrency limits in `src/http/mod.rs`, returning 429 with `Retry-After` and leaving other callers unaffected (FR-025)
 - [ ] T076 [P] [US3] Bind a session to the identity that created it in `src/http/mod.rs`, and let an in-flight scan finish when its token expires while requiring a valid token for any new request
 - [ ] T077 [P] [US3] Emit the Scan Record as a structured log line from `src/observe.rs` — caller, target, resolved ref, scanners, outcome, timing — including authorization refusals (FR-026, FR-035). Nothing is persisted
 - [ ] T078 [US3] Implement Prometheus metrics in `src/observe.rs`: scans by terminal status, scan and per-scanner durations, backend reachability, in-flight executions and queue depth, per-caller rejections (FR-037)
-- [ ] T079 [US3] Enforce the metric label allowlist in `src/observe.rs` so repository names, target URLs, caller subjects, and paths can never become label values (FR-038)
+- [X] T079 [US3] Enforce the metric label allowlist in `src/observe.rs` so repository names, target URLs, caller subjects, and paths can never become label values (FR-038)
 - [ ] T080 [P] [US3] Serve `/metrics` from `src/http/mod.rs` with no MCP token required and a separate bind address, so an operator can expose it only to scrape infrastructure (FR-039)
-- [ ] T081 [P] [US3] Add `/healthz` and `/readyz` to `src/http/mod.rs`, distinguishing alive from ready — an unreachable backend is not a reason to be killed
-- [ ] T082 [US3] Add transport selection to `src/main.rs`, defaulting to stdio with no listener and no authentication (FR-019, SC-001)
-- [ ] T083 [P] [US3] Add request body size limits and origin validation in `src/http/mod.rs` to bound denial-of-service and prevent DNS rebinding against a loopback-bound server
-- [ ] T084 [P] [US3] Extend `audit_status` in `src/server.rs` with the transport kind and authentication mode per contracts/mcp-tools.md
+- [X] T081 [P] [US3] Add `/healthz` and `/readyz` to `src/http/mod.rs`, distinguishing alive from ready — an unreachable backend is not a reason to be killed
+- [X] T082 [US3] Add transport selection to `src/main.rs`, defaulting to stdio with no listener and no authentication (FR-019, SC-001)
+- [X] T083 [P] [US3] Add request body size limits and origin validation in `src/http/mod.rs` to bound denial-of-service and prevent DNS rebinding against a loopback-bound server
+- [X] T084 [P] [US3] Extend `audit_status` in `src/server.rs` with the transport kind and authentication mode per contracts/mcp-tools.md
 
 **Checkpoint**: All three stories work independently.
 

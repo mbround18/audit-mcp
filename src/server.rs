@@ -11,13 +11,13 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 
 use crate::{
-    config::{Config, ExecutorKind},
+    config::{Config, ExecutorKind, TransportKind},
     explain::FindingExplainer,
     fixes::FixEngine,
     models::{
         ExecutorStatus, FindingExplanation, ListScannersResponse, NormalizedFinding,
         RunScanResponse, RunStatus, ScanSummary, ScannerRunResult, Severity, SuggestFixesResponse,
-        ToolSelectionPlan, WorkspaceStatus,
+        ToolSelectionPlan, TransportStatus, WorkspaceStatus,
     },
     redact::Redactor,
     runner::{ScanOptions, ScanRunner},
@@ -95,6 +95,8 @@ pub struct AuditStatusResponse {
     pub executor: ExecutorStatus,
     /// What the workspace layer can do here.
     pub workspace: WorkspaceStatus,
+    /// How MCP is being served, and what that implies.
+    pub transport: TransportStatus,
     /// Whether the active backend is reachable right now. Scans require it.
     ///
     /// Retained under its original name so existing callers keep working; new
@@ -222,6 +224,14 @@ impl AuditMcpServer {
         }
 
         Json(AuditStatusResponse {
+            transport: TransportStatus {
+                kind: self.config.transport.kind.as_str().to_string(),
+                authentication: match self.config.transport.kind {
+                    TransportKind::Stdio => "none".to_string(),
+                    TransportKind::Http => "oauth2".to_string(),
+                },
+                remote_targets_supported: self.config.transport.kind == TransportKind::Stdio,
+            },
             workspace: WorkspaceStatus {
                 git_available,
                 remote_scanning_enabled: self.config.workspace.allow_remote_targets,
@@ -274,6 +284,24 @@ impl AuditMcpServer {
             (Some(reference), _) => format!("{}#{reference}", request.target),
             (None, _) => request.target.clone(),
         };
+
+        // Authentication proves who is calling; it does not entitle them to
+        // whatever this server can reach. Until the caller's identity is
+        // threaded from the HTTP layer into this handler and checked against
+        // the repository (FR-031), a remote target on the hosted transport
+        // would let any authenticated caller borrow the server's credential —
+        // a confused deputy. Refuse rather than ship that.
+        if self.config.transport.kind == TransportKind::Http
+            && matches!(
+                crate::workspace::target::parse(&target_expression),
+                Ok(crate::workspace::target::TargetExpression::Remote(_))
+            )
+        {
+            return Err(
+                "repository targets are not yet available on the hosted HTTP transport: per-caller authorization is not wired up, and using the server's own credential on your behalf would let you read repositories you cannot. Scan a local path, or use the stdio transport."
+                    .to_string(),
+            );
+        }
 
         // One workspace per scan, shared read-only by every scanner it runs.
         let workspace = Arc::new(

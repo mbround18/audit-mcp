@@ -2,6 +2,8 @@ pub mod config;
 pub mod executor;
 pub mod explain;
 pub mod fixes;
+#[cfg(feature = "http")]
+pub mod http;
 pub mod models;
 pub mod observe;
 pub mod parsers;
