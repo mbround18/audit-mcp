@@ -194,6 +194,9 @@ target; a local path is refused with an explanation rather than scanned as an
 empty directory. Clone credentials are delivered through a Secret, never the Job
 spec (which anyone with `get jobs` can read).
 
+Ready-to-apply manifests, RBAC, and sizing are in
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+
 Operator knobs: `AUDIT_K8S_SERVICE_ACCOUNT`, `AUDIT_K8S_CPU_REQUEST`/`_LIMIT`,
 `AUDIT_K8S_MEMORY_REQUEST`/`_LIMIT`, `AUDIT_K8S_NODE_SELECTOR`,
 `AUDIT_K8S_TOLERATIONS`, `AUDIT_K8S_IMAGE_PULL_SECRETS`,
@@ -299,6 +302,7 @@ repeat scans are fast. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Module structure, the executor seam, why status lives where it does |
 | [docs/SCANNERS.md](docs/SCANNERS.md) | Every scanner, base images, exit codes, normalization |
 | [docs/SECURITY.md](docs/SECURITY.md) | Isolation model and threat considerations |
+| [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Kubernetes manifests, RBAC, and what not to mount |
 | [docs/CACHE.md](docs/CACHE.md) | Cache volume strategy |
 | [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) | Building, testing, and adding scanners |
 

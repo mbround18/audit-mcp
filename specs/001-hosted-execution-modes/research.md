@@ -279,10 +279,32 @@ plus a sampled working-tree check instead.
 Signing the GitHub App assertion is part of the always-on clone path, so it
 moved out of the `http` feature.
 
+## R12. Delivering a caller-scoped forge credential (closes R10)
+
+**Decision**: the caller supplies one per request in an `X-Audit-Github-Token`
+header — a GitHub App installation token or a PAT.
+
+**Rationale**: it needs no token-exchange support from the identity provider,
+so any JWT-issuing OIDC provider works unchanged. And it improves on merely
+*checking* access: the credential that proved the caller may read the
+repository is the credential the clone uses, so what a caller can scan is
+exactly what they could already read, by construction.
+
+**Why a header and not a tool argument**: a token in a tool argument flows
+through the model's context, where it would be logged, summarized, and quite
+possibly repeated back.
+
+**Care required**: the caller-scoped configuration strips every server-held
+source. Leaving one in place would reintroduce the confused deputy by the back
+door, since a scan could fall back to the server's broader access once the
+caller's credential failed.
+
 ## Open questions for implementation
-- How does a caller-scoped forge credential reach the authorization check
-  (R10) under a JWT-only IdP — token exchange, a caller-supplied token, or
-  provider-specific claims? Blocks Phase D only.
+
+- Persistent scanner caching in the cluster. The Docker backend's named cache
+  volumes have no direct Kubernetes equivalent, so a cluster scan pays a cold
+  cache every time. Correctness first; revisit if install cost measurably
+  dominates a real workload.
 
 **Closed by the 2026-08-25 clarification session**: the first identity provider
 (R3), caller authorization (R10), the workspace sharing model (R11), and the

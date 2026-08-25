@@ -40,6 +40,12 @@ until a real container ran.
 - Assert on normalized findings — rule ID, severity, file, line — never on
   substrings of raw logs. A log-grep assertion passes even when normalization
   is completely broken.
+- **A passing test must fail for the right reason.** Where setup can fail in a
+  way that resembles the expected outcome, assert that the setup succeeded.
+  Two authorization tests once passed because MCP refused every call for want
+  of an `initialize` handshake — and "refused" was exactly what they checked
+  for. A test that cannot tell "the thing works" from "nothing ran" is worse
+  than no test, because it is believed.
 
 ### III. Isolation is the product
 
@@ -113,4 +119,13 @@ explicitly in the same change, with the reasoning recorded.
 Amendments require: the principle amended, the failure or requirement that
 motivated it, and the test that will enforce the new rule.
 
-**Version**: 1.0.0 | **Ratified**: 2026-08-25 | **Last Amended**: 2026-08-25
+## Amendments
+
+**1.1.0** — Added the vacuous-test rule to Principle II. Motivated by
+`tests/http_auth.rs`: MCP requires an `initialize` handshake, and without one
+every call fails with "expect initialize request". Two authorization tests
+asserted a refusal, received that failure instead, and passed while exercising
+nothing at all. The rule generalizes beyond MCP: assert the setup took,
+wherever setup failure can imitate the expected result.
+
+**Version**: 1.1.0 | **Ratified**: 2026-08-25 | **Last Amended**: 2026-08-25

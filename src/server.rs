@@ -124,6 +124,15 @@ pub struct AuditMcpServer {
     /// Per-caller repository access checks. Only consulted when a request
     /// carries an identity, which on stdio it never does.
     authorizer: Arc<Authorizer>,
+    logger: Arc<crate::observe::Logger>,
+    metrics: Arc<crate::observe::Metrics>,
+}
+
+impl AuditMcpServer {
+    /// The metrics registry, so the HTTP layer can expose it.
+    pub fn metrics(&self) -> Arc<crate::observe::Metrics> {
+        Arc::clone(&self.metrics)
+    }
 }
 
 impl AuditMcpServer {
@@ -173,6 +182,8 @@ impl AuditMcpServer {
                     .map(|oauth| oauth.authz_cache_ttl)
                     .unwrap_or(std::time::Duration::from_secs(300)),
             )),
+            logger: Arc::new(crate::observe::Logger::from_config(&config.observability)),
+            metrics: Arc::new(crate::observe::Metrics::new()),
             config: Arc::new(config),
         })
     }
@@ -295,13 +306,24 @@ impl AuditMcpServer {
         request: RunScanRequest,
         caller: Option<CallerContext>,
     ) -> Result<Json<RunScanResponse>, String> {
+        let started = std::time::Instant::now();
+        let caller_name = caller
+            .as_ref()
+            .map(|caller| caller.identity.subject.clone())
+            .unwrap_or_else(|| "local".to_string());
+
         // One preflight beats N identical per-scanner failures.
-        if !self.runner.is_available().await {
+        let available = self.runner.is_available().await;
+        self.metrics
+            .backend_reachability(self.runner.backend(), available);
+        if !available {
+            self.metrics.rejected("backend_unreachable");
             return Err(format!(
                 "the '{}' execution backend is not reachable, so no scanner can run. Start it and retry; call audit_status to re-check.",
                 self.runner.backend()
             ));
         }
+        self.metrics.scan_started();
 
         // Secrets are scoped to this scan, so clearing them when the workspace
         // is released cannot unregister a concurrent scan's credential.
@@ -392,9 +414,43 @@ impl AuditMcpServer {
         }))
         .await;
 
+        for run in &runs {
+            if let Some(execution) = &run.execution {
+                self.metrics.scanner_finished(
+                    &run.scanner,
+                    run.status.as_str(),
+                    execution.duration_ms as f64 / 1000.0,
+                );
+            }
+        }
+
         let (runs, summary) = shape_results(runs, &request);
 
+        // The scan record is the audit trail: who asked, for what, and what
+        // came back. Emitted for every scan, including refusals.
+        let outcome = if summary.scanners_failed > 0 || summary.scanners_timed_out > 0 {
+            "partial"
+        } else if summary.total_findings > 0 {
+            "findings"
+        } else {
+            "clean"
+        };
+        let duration_ms = started.elapsed().as_millis() as u64;
+        self.metrics
+            .scan_finished(mode.as_str(), outcome, started.elapsed().as_secs_f64());
+
         let workspace_info = workspace.info().clone();
+        crate::observe::ScanRecord {
+            caller: caller_name,
+            target: request.target.clone(),
+            resolved_ref: workspace_info.resolved_ref.clone(),
+            scanners: runs.iter().map(|run| run.scanner.clone()).collect(),
+            outcome: outcome.to_string(),
+            findings: summary.findings_returned,
+            duration_ms,
+        }
+        .emit(&self.logger, &options.redactor);
+
         // Release before responding: the tree is gone by the time a caller
         // reads the result, on every path including failure.
         drop(workspace);

@@ -188,6 +188,48 @@ The normalization layer, in preference order:
 
 Findings get a **stable fingerprint** (`scanner:rule:path:line`) that contains no run ID, so results can be diffed across runs, and `id` is the tool's own rule identifier so it can be passed straight to `explain_finding`.
 
+### `http/` and `authz.rs`
+
+The hosted transport, behind the `http` feature. `rmcp`'s `StreamableHttpService`
+is a `tower::Service`, so authentication wraps it as a layer rather than
+forking the handler.
+
+- `http/auth.rs` — the Resource Server half of MCP authorization, which `rmcp`
+  does not provide: JWKS fetch and cache, algorithm allowlist, and validation
+  of issuer, expiry, and **audience**.
+- `http/metadata.rs` — the RFC 9728 document a client fetches to discover where
+  to authenticate.
+- `http/mod.rs` — the axum app: routes, per-caller concurrency, session
+  ownership, body limits, `/healthz`, `/readyz`, `/metrics`.
+- `authz.rs` — per-caller repository access. Deliberately *not* under `http/`:
+  the scan path must be able to ask whether it has a caller whatever transport
+  is in use, and on stdio the answer is no.
+
+**How a caller reaches the tool handler.** The middleware validates a token and
+attaches a `CallerContext` to the request extensions. `rmcp` forwards the whole
+`http::request::Parts` into the tool context, so `server.rs` reads it back out.
+On stdio there are no parts and no caller — correct, because the caller is the
+operator and there is nobody to authorize.
+
+**Why authorization is not just a check.** A caller supplies their own forge
+credential; it is verified against the repository, and then used for the clone.
+Every server-held credential is stripped from the caller-scoped configuration,
+so there is no path by which a scan authorized for one caller falls back to the
+server's broader access. What a caller can scan is what they could already
+read.
+
+### `observe.rs`
+
+Structured logs to **stderr**, always — on stdio, stdout carries the JSON-RPC
+stream and a stray log line corrupts the protocol. Scan records are log lines,
+not rows: nothing is persisted and retention belongs to the operator.
+
+Metrics are a no-op type without the `http` feature, so `server.rs` calls them
+unconditionally without knowing whether anything is listening. Label values come
+from bounded vocabularies and anything else becomes `other`: the metrics
+endpoint is deliberately less protected than `/mcp`, so a repository name in a
+label would be both a disclosure and an unbounded time series.
+
 ### `explain.rs` / `fixes.rs`
 
 Knowledge-base modules that return contextual explanations and fix suggestions given a scanner name and finding. Currently scaffolded — extend by adding scanner-specific entries.
@@ -248,6 +290,12 @@ Three layers:
 - **Backend parity** — `tests/executor_parity.rs`. The same scanner and
   repository through both backends must yield the same rule IDs, severities,
   and locations.
+- **HTTP auth** — `tests/http_auth.rs`, against a real socket with a local mock
+  issuer that signs tokens and serves a JWKS. Note the trap it now guards
+  against: MCP requires an `initialize` handshake, and without it every call
+  fails with "expect initialize request" — which reads like a refusal, so two
+  authorization tests once passed while proving nothing. The helper asserts the
+  handshake took.
 - **Scanner smoke tests** — `tests/scanner_smoke.rs`. Runs every scanner that declares structured output against a matching fixture and asserts it does not come back as `tool_error`, `timeout`, or `unparsed`. Split by cost into `smoke_fast_tier`, `smoke_slow_tier` (Go/Rust, which compile first), `smoke_jvm_tier`, `smoke_scripting_tier` (Ruby/PHP), `smoke_dotnet_tier`, and `smoke_elixir_tier`. This is the only layer that catches a command template no image can execute — a swallowed ENTRYPOINT, a renamed flag, a tool missing from the base image, a `-quiet` that suppresses the whole report. Run it after any change to a `command_template`, an image, or an install script.
 
   Set `AUDIT_MCP_CORPUS` to a directory of real example projects to smoke the scanners against realistic code instead of the minimal in-repo fixtures:

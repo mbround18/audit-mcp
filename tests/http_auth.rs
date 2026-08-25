@@ -75,13 +75,14 @@ async fn start_server(issuer: &str) -> SocketAddr {
         ..Default::default()
     };
 
-    let state = Arc::new(HttpState {
-        resource_server: ResourceServer::new(oauth.clone(), RESOURCE.to_string()),
-        authorizer: Arc::new(Authorizer::new(oauth.authz_cache_ttl)),
-        metadata: ProtectedResourceMetadata::from_config(&transport).expect("metadata"),
-        metadata_url: format!("https://audit.example.test{METADATA_PATH}"),
-        per_caller_limit: 2,
-    });
+    let state = Arc::new(HttpState::new(
+        ResourceServer::new(oauth.clone(), RESOURCE.to_string()),
+        Arc::new(Authorizer::new(oauth.authz_cache_ttl)),
+        ProtectedResourceMetadata::from_config(&transport).expect("metadata"),
+        format!("https://audit.example.test{METADATA_PATH}"),
+        2,
+        Arc::new(audit_mcp::observe::Metrics::new()),
+    ));
 
     let app = router(&config, state).expect("router builds");
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -473,5 +474,101 @@ async fn two_callers_do_not_see_each_others_scans() {
     assert!(
         !second.to_string().contains("fixtures/shellcheck"),
         "one caller's response leaked the other's target"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn metrics_are_scrapable_without_a_token() {
+    // A scraper does not carry an MCP token, so requiring one would make the
+    // endpoint useless.
+    let issuer = start_issuer().await;
+    let address = start_server(&issuer).await;
+
+    let response = reqwest::Client::new()
+        .get(format!("http://{address}/metrics"))
+        .send()
+        .await
+        .expect("metrics request");
+    assert_eq!(response.status(), 200);
+    let body = response.text().await.expect("body");
+    assert!(
+        body.contains("audit_scans_total") || body.contains("audit_scans_in_flight"),
+        "expected audit metrics: {body}"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn metrics_never_carry_a_target_or_caller_in_a_label() {
+    // SC-012. The endpoint is deliberately less protected than /mcp, so
+    // anything in a label is effectively public — and each distinct value is a
+    // time series that is never reclaimed.
+    let issuer = start_issuer().await;
+    let address = start_server(&issuer).await;
+    let token = sign(json!({
+        "sub": "user-with-a-distinctive-subject", "iss": issuer, "aud": RESOURCE,
+        "exp": now() + 300, "scope": "audit:scan",
+    }));
+
+    let fixture = format!("{}/tests/fixtures/shellcheck", env!("CARGO_MANIFEST_DIR"));
+    let _ = call_run_scan(address, &token, None, &fixture).await;
+
+    let body = reqwest::Client::new()
+        .get(format!("http://{address}/metrics"))
+        .send()
+        .await
+        .expect("metrics request")
+        .text()
+        .await
+        .expect("body");
+
+    assert!(
+        !body.contains("user-with-a-distinctive-subject"),
+        "a caller subject reached a metric label"
+    );
+    assert!(
+        !body.contains("fixtures/shellcheck"),
+        "a path reached a label"
+    );
+    assert!(
+        !body.contains(env!("CARGO_MANIFEST_DIR")),
+        "a path reached a label"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_session_belongs_to_the_caller_who_opened_it() {
+    // Knowing a session id is not a credential.
+    let issuer = start_issuer().await;
+    let address = start_server(&issuer).await;
+
+    let one = sign(json!({
+        "sub": "user-1", "iss": issuer, "aud": RESOURCE,
+        "exp": now() + 300, "scope": "audit:scan",
+    }));
+    let two = sign(json!({
+        "sub": "user-2", "iss": issuer, "aud": RESOURCE,
+        "exp": now() + 300, "scope": "audit:scan",
+    }));
+
+    let session = open_session(address, &one).await;
+
+    let stolen = reqwest::Client::new()
+        .post(format!("http://{address}/mcp"))
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json, text/event-stream")
+        .header("Mcp-Session-Id", &session)
+        .bearer_auth(&two)
+        .json(&json!({ "jsonrpc": "2.0", "id": 9, "method": "tools/list" }))
+        .send()
+        .await
+        .expect("request completes");
+
+    assert_eq!(
+        stolen.status(),
+        403,
+        "a second identity must not continue the first one's session"
     );
 }

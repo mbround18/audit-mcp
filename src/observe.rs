@@ -177,3 +177,225 @@ mod tests {
         assert!(line.starts_with("warn docker_unreachable"));
     }
 }
+
+/// The audit trail for one scan, emitted as a structured log line.
+///
+/// Never stored: this is a log record, not a findings database. Collection and
+/// retention belong to whoever runs the deployment.
+#[derive(Debug, Clone)]
+pub struct ScanRecord {
+    /// Who asked, or `local` on stdio where the caller is the operator.
+    pub caller: String,
+    pub target: String,
+    pub resolved_ref: Option<String>,
+    pub scanners: Vec<String>,
+    pub outcome: String,
+    pub findings: usize,
+    pub duration_ms: u64,
+}
+
+impl ScanRecord {
+    /// Render the record. Redaction is applied even though nothing here should
+    /// ever contain a secret — a target can be a URL a caller supplied, and
+    /// "should never" is not a control.
+    pub fn emit(&self, logger: &Logger, redactor: &crate::redact::Redactor) {
+        logger.info(
+            "scan",
+            json!({
+                "caller": self.caller,
+                "target": redactor.redact(&self.target),
+                "resolved_ref": self.resolved_ref,
+                "scanners": self.scanners,
+                "outcome": self.outcome,
+                "findings": self.findings,
+                "duration_ms": self.duration_ms,
+            }),
+        );
+    }
+}
+
+/// Values that may appear as a metric label.
+///
+/// The metrics endpoint is deliberately less protected than the MCP endpoint,
+/// so anything reaching a label is effectively public. Repository names, target
+/// URLs, caller subjects, and file paths are barred — they would both publish
+/// private information and explode cardinality, since each distinct value
+/// creates a new time series that is never reclaimed.
+pub fn is_safe_label_value(value: &str) -> bool {
+    // Bounded vocabularies only: statuses, modes, scanner names, backends.
+    // Anything caller-supplied fails at least one of these.
+    !value.is_empty()
+        && value.len() <= 64
+        && !value.contains('/')
+        && !value.contains(':')
+        && !value.contains('.')
+        && !value.contains('@')
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+}
+
+#[cfg(feature = "http")]
+pub use metrics::Metrics;
+
+#[cfg(feature = "http")]
+mod metrics {
+    use super::is_safe_label_value;
+    use prometheus::{
+        Encoder, HistogramOpts, HistogramVec, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry,
+        TextEncoder,
+    };
+
+    /// Prometheus metrics for one server.
+    #[derive(Debug, Clone)]
+    pub struct Metrics {
+        registry: Registry,
+        scans: IntCounterVec,
+        scan_duration: HistogramVec,
+        scanner_duration: HistogramVec,
+        backend_available: IntGaugeVec,
+        in_flight: IntGauge,
+        rejections: IntCounterVec,
+    }
+
+    impl Default for Metrics {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl Metrics {
+        pub fn new() -> Self {
+            let registry = Registry::new();
+
+            let scans = IntCounterVec::new(
+                Opts::new("audit_scans_total", "Scans by terminal status."),
+                &["status"],
+            )
+            .expect("valid metric");
+            let scan_duration = HistogramVec::new(
+                HistogramOpts::new("audit_scan_duration_seconds", "Wall-clock time per scan."),
+                &["mode"],
+            )
+            .expect("valid metric");
+            let scanner_duration = HistogramVec::new(
+                HistogramOpts::new(
+                    "audit_scanner_duration_seconds",
+                    "Wall-clock time per scanner run.",
+                ),
+                &["scanner", "status"],
+            )
+            .expect("valid metric");
+            let backend_available = IntGaugeVec::new(
+                Opts::new(
+                    "audit_backend_available",
+                    "1 when the execution backend was last seen reachable.",
+                ),
+                &["backend"],
+            )
+            .expect("valid metric");
+            let in_flight = IntGauge::new("audit_scans_in_flight", "Scans currently executing.")
+                .expect("valid metric");
+            let rejections = IntCounterVec::new(
+                Opts::new(
+                    "audit_caller_rejections_total",
+                    "Requests refused, by reason.",
+                ),
+                &["reason"],
+            )
+            .expect("valid metric");
+
+            for collector in [
+                Box::new(scans.clone()) as Box<dyn prometheus::core::Collector>,
+                Box::new(scan_duration.clone()),
+                Box::new(scanner_duration.clone()),
+                Box::new(backend_available.clone()),
+                Box::new(in_flight.clone()),
+                Box::new(rejections.clone()),
+            ] {
+                registry.register(collector).expect("unique metric");
+            }
+
+            Self {
+                registry,
+                scans,
+                scan_duration,
+                scanner_duration,
+                backend_available,
+                in_flight,
+                rejections,
+            }
+        }
+
+        /// Reject any label value that is not from a bounded vocabulary.
+        ///
+        /// Silently substituting is better than publishing: a caller-supplied
+        /// value here would be both a leak and an unbounded time series.
+        fn label(value: &str) -> &str {
+            if is_safe_label_value(value) {
+                value
+            } else {
+                "other"
+            }
+        }
+
+        pub fn scan_started(&self) {
+            self.in_flight.inc();
+        }
+
+        pub fn scan_finished(&self, mode: &str, outcome: &str, duration_secs: f64) {
+            self.in_flight.dec();
+            self.scans.with_label_values(&[Self::label(outcome)]).inc();
+            self.scan_duration
+                .with_label_values(&[Self::label(mode)])
+                .observe(duration_secs);
+        }
+
+        pub fn scanner_finished(&self, scanner: &str, status: &str, duration_secs: f64) {
+            self.scanner_duration
+                .with_label_values(&[Self::label(scanner), Self::label(status)])
+                .observe(duration_secs);
+        }
+
+        pub fn backend_reachability(&self, backend: &str, available: bool) {
+            self.backend_available
+                .with_label_values(&[Self::label(backend)])
+                .set(i64::from(available));
+        }
+
+        pub fn rejected(&self, reason: &str) {
+            self.rejections
+                .with_label_values(&[Self::label(reason)])
+                .inc();
+        }
+
+        /// Render the exposition format.
+        pub fn render(&self) -> String {
+            let mut buffer = Vec::new();
+            let encoder = TextEncoder::new();
+            let _ = encoder.encode(&self.registry.gather(), &mut buffer);
+            String::from_utf8(buffer).unwrap_or_default()
+        }
+    }
+}
+
+/// Without the HTTP transport there is nothing to scrape, so every call is a
+/// no-op and the type costs nothing.
+#[cfg(not(feature = "http"))]
+#[derive(Debug, Clone, Default)]
+pub struct Metrics;
+
+#[cfg(not(feature = "http"))]
+impl Metrics {
+    pub fn new() -> Self {
+        Self
+    }
+    pub fn scan_started(&self) {}
+    pub fn scan_finished(&self, _mode: &str, _outcome: &str, _duration_secs: f64) {}
+    pub fn scanner_finished(&self, _scanner: &str, _status: &str, _duration_secs: f64) {}
+    pub fn backend_reachability(&self, _backend: &str, _available: bool) {}
+    pub fn rejected(&self, _reason: &str) {}
+    pub fn render(&self) -> String {
+        String::new()
+    }
+}

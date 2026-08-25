@@ -182,7 +182,7 @@ starting T071.
 - [X] T061 [P] [US3] Add rejection cases to `tests/http_auth.rs`: malformed token, expired token, wrong issuer, and `alg: none` — each a 401 with no indication of which check failed
 - [X] T062 [P] [US3] Add the audience test to `tests/http_auth.rs`: a valid token minted by the same issuer for a **different** resource must be rejected (SC-006). This is the defect a hand-rolled resource server most often ships
 - [X] T063 [P] [US3] Add an authorization test to `tests/http_auth.rs` asserting that a caller who cannot read a private repository cannot cause the server to scan it, even when a server-held credential would have granted access (SC-010)
-- [ ] T064 [P] [US3] Add a metrics leakage test to `tests/secret_hygiene.rs` asserting no label value scraped after a scan contains a repository name, target URL, caller subject, or file path (SC-012)
+- [X] T064 [P] [US3] Add a metrics leakage test to `tests/secret_hygiene.rs` asserting no label value scraped after a scan contains a repository name, target URL, caller subject, or file path (SC-012)
 - [X] T065 [P] [US3] Add an isolation test to `tests/http_auth.rs`: two identities scanning concurrently, neither response containing the other's target, findings, or workspace (FR-024)
 
 ### Implementation for User Story 3
@@ -196,12 +196,12 @@ starting T071.
 - [X] T072 [US3] Implement the authorization decision cache in `src/http/authz.rs`, keyed by caller and repository with a bounded lifetime so revoked access stops working promptly (FR-034)
 - [X] T073 [US3] Refuse unauthorized targets in `src/http/authz.rs` without disclosing whether the repository exists (FR-033)
 - [X] T074 [US3] Scope every scan to its caller in `src/http/mod.rs`: workspace, credentials, findings, and in-flight state keyed by caller identity, so no request can observe or reuse another caller's scan context (FR-024)
-- [ ] T075 [P] [US3] Implement per-caller concurrency limits in `src/http/mod.rs`, returning 429 with `Retry-After` and leaving other callers unaffected (FR-025)
-- [ ] T076 [P] [US3] Bind a session to the identity that created it in `src/http/mod.rs`, and let an in-flight scan finish when its token expires while requiring a valid token for any new request
-- [ ] T077 [P] [US3] Emit the Scan Record as a structured log line from `src/observe.rs` — caller, target, resolved ref, scanners, outcome, timing — including authorization refusals (FR-026, FR-035). Nothing is persisted
-- [ ] T078 [US3] Implement Prometheus metrics in `src/observe.rs`: scans by terminal status, scan and per-scanner durations, backend reachability, in-flight executions and queue depth, per-caller rejections (FR-037)
+- [X] T075 [P] [US3] Implement per-caller concurrency limits in `src/http/mod.rs`, returning 429 with `Retry-After` and leaving other callers unaffected (FR-025)
+- [X] T076 [P] [US3] Bind a session to the identity that created it in `src/http/mod.rs`, and let an in-flight scan finish when its token expires while requiring a valid token for any new request
+- [X] T077 [P] [US3] Emit the Scan Record as a structured log line from `src/observe.rs` — caller, target, resolved ref, scanners, outcome, timing — including authorization refusals (FR-026, FR-035). Nothing is persisted
+- [X] T078 [US3] Implement Prometheus metrics in `src/observe.rs`: scans by terminal status, scan and per-scanner durations, backend reachability, in-flight executions and queue depth, per-caller rejections (FR-037)
 - [X] T079 [US3] Enforce the metric label allowlist in `src/observe.rs` so repository names, target URLs, caller subjects, and paths can never become label values (FR-038)
-- [ ] T080 [P] [US3] Serve `/metrics` from `src/http/mod.rs` with no MCP token required and a separate bind address, so an operator can expose it only to scrape infrastructure (FR-039)
+- [X] T080 [P] [US3] Serve `/metrics` from `src/http/mod.rs` with no MCP token required and a separate bind address, so an operator can expose it only to scrape infrastructure (FR-039)
 - [X] T081 [P] [US3] Add `/healthz` and `/readyz` to `src/http/mod.rs`, distinguishing alive from ready — an unreachable backend is not a reason to be killed
 - [X] T082 [US3] Add transport selection to `src/main.rs`, defaulting to stdio with no listener and no authentication (FR-019, SC-001)
 - [X] T083 [P] [US3] Add request body size limits and origin validation in `src/http/mod.rs` to bound denial-of-service and prevent DNS rebinding against a loopback-bound server
@@ -213,16 +213,16 @@ starting T071.
 
 ## Phase 6: Polish & Cross-Cutting Concerns
 
-- [ ] T085 [P] Update `README.md`: the three optional modes, the new `run_scan` arguments and response fields, and an explicit statement that the default is unchanged
-- [ ] T086 [P] Update `docs/ARCHITECTURE.md` with the executor seam, the workspace layer, the HTTP surface, and why status determination deliberately stays out of the executor
-- [ ] T087 [P] Update `docs/SECURITY.md` with the threat model this feature introduces: SSRF, confused-deputy authorization, credential leakage, metrics exposure, and multi-tenant isolation
-- [ ] T088 [P] Add `docs/DEPLOYMENT.md` with example Kubernetes manifests — RBAC for Job management, a Secret for credentials, and a scrape-only path to `/metrics`
-- [ ] T089 [P] Ship a container image containing `git`, and document that the clone path depends on it (R5)
-- [ ] T090 Run every scenario in `specs/001-hosted-execution-modes/quickstart.md`, Scenario 0 first and last, including scraping `/metrics` and confirming scan counts by status and backend reachability are readable without opening a log (SC-011)
-- [ ] T091 Confirm SC-001 by diffing a default-configuration `list_scanners` and `run_scan` response against the pre-feature baseline
-- [ ] T092 [P] Run `cargo clippy --all-features -- -D warnings` and `cargo fmt --check`
-- [ ] T093 Review whether any constitution principle needs amending, and record the reasoning in `.specify/memory/constitution.md` if so — the constitution requires an explicit amendment rather than a quiet exception
-- [ ] T094 Close or re-record the remaining open questions in `specs/001-hosted-execution-modes/research.md`: pod log interleaving (T053) and persistent scanner caching in-cluster (T059)
+- [X] T085 [P] Update `README.md`: the three optional modes, the new `run_scan` arguments and response fields, and an explicit statement that the default is unchanged
+- [X] T086 [P] Update `docs/ARCHITECTURE.md` with the executor seam, the workspace layer, the HTTP surface, and why status determination deliberately stays out of the executor
+- [X] T087 [P] Update `docs/SECURITY.md` with the threat model this feature introduces: SSRF, confused-deputy authorization, credential leakage, metrics exposure, and multi-tenant isolation
+- [X] T088 [P] Add `docs/DEPLOYMENT.md` with example Kubernetes manifests — RBAC for Job management, a Secret for credentials, and a scrape-only path to `/metrics`
+- [X] T089 [P] Ship a container image containing `git`, and document that the clone path depends on it (R5)
+- [X] T090 Run every scenario in `specs/001-hosted-execution-modes/quickstart.md`, Scenario 0 first and last, including scraping `/metrics` and confirming scan counts by status and backend reachability are readable without opening a log (SC-011)
+- [X] T091 Confirm SC-001 by diffing a default-configuration `list_scanners` and `run_scan` response against the pre-feature baseline
+- [X] T092 [P] Run `cargo clippy --all-features -- -D warnings` and `cargo fmt --check`
+- [X] T093 Review whether any constitution principle needs amending, and record the reasoning in `.specify/memory/constitution.md` if so — the constitution requires an explicit amendment rather than a quiet exception
+- [X] T094 Close or re-record the remaining open questions in `specs/001-hosted-execution-modes/research.md`: pod log interleaving (T053) and persistent scanner caching in-cluster (T059)
 
 ---
 
