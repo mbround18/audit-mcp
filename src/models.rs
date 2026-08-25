@@ -155,6 +155,9 @@ impl RunStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ScanExecution {
     pub run_id: String,
+    /// Which execution backend ran this scanner.
+    #[serde(default)]
+    pub backend: String,
     pub image: String,
     pub command: Vec<String>,
     pub status: String,
@@ -200,6 +203,8 @@ pub struct ScanSummary {
 pub struct RunScanResponse {
     pub mode: String,
     pub target: String,
+    /// Where the scanned code came from.
+    pub workspace: WorkspaceInfo,
     pub selection: ToolSelectionPlan,
     pub summary: ScanSummary,
     pub runs: Vec<ScannerRunResult>,
@@ -257,6 +262,33 @@ pub struct FixSuggestion {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SuggestFixesResponse {
     pub suggestions: Vec<FixSuggestion>,
+}
+
+/// Where a scan's code came from, and how it was obtained.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct WorkspaceInfo {
+    /// `local_path`, `git_https`, or `git_ssh`.
+    pub origin: String,
+    /// Normalized location. Never contains credentials.
+    pub source: String,
+    /// Commit actually scanned; absent for a local path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_ref: Option<String>,
+    /// Which credential source authenticated the clone — the name, never the
+    /// value. Absent for a local path or an anonymous clone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_source: Option<String>,
+}
+
+/// What the workspace layer can do in this deployment.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct WorkspaceStatus {
+    /// Whether `git` is on PATH. Without it, only local paths can be scanned.
+    pub git_available: bool,
+    /// Whether a remote target may be cloned at all.
+    pub remote_scanning_enabled: bool,
+    /// Names of the configured credential sources. Never their values.
+    pub credential_sources: Vec<String>,
 }
 
 /// Which execution backend is active and whether it can be reached.

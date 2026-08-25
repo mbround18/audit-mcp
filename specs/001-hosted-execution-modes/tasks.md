@@ -95,31 +95,31 @@ confirm the temporary directory is gone.
 
 > Write these first and confirm they fail.
 
-- [ ] T021 [P] [US1] Unit-test target expression parsing in `src/workspace/target.rs`: local paths, HTTPS URLs, SSH URLs, `owner/repo`, inline `#ref`, and the rule that an existing local path always wins. Parsing is side-effect free, so this is exhaustive and hermetic
-- [ ] T022 [P] [US1] Unit-test SSRF rejection in `src/workspace/target.rs` for private, loopback, and link-local resolutions, plus the `AUDIT_ALLOW_PRIVATE_ADDRESSES` opt-out
-- [ ] T023 [P] [US1] Unit-test credential precedence and reporting in `src/workspace/credentials.rs`: the documented order, and that a `Debug`/`Display` render of any credential never contains the secret
-- [ ] T024 [P] [US1] Integration test in `tests/workspace_clone.rs` (`#[ignore]`, self-skipping without network/`git`): clone a public repository, assert repository-relative finding paths, assert `resolved_ref` is a SHA, assert the temporary directory is removed
-- [ ] T025 [P] [US1] Add a failure-path case to `tests/workspace_clone.rs`: a scan that errors must still remove its workspace (SC-005) — the failure path is the one that leaks
-- [ ] T026 [P] [US1] Write `tests/secret_hygiene.rs` (`#[ignore]`): seed a sentinel into every credential source, run a scan, serialize the whole response, assert the sentinel appears nowhere in logs, execution metadata, findings, or errors (SC-004)
+- [X] T021 [P] [US1] Unit-test target expression parsing in `src/workspace/target.rs`: local paths, HTTPS URLs, SSH URLs, `owner/repo`, inline `#ref`, and the rule that an existing local path always wins. Parsing is side-effect free, so this is exhaustive and hermetic
+- [X] T022 [P] [US1] Unit-test SSRF rejection in `src/workspace/target.rs` for private, loopback, and link-local resolutions, plus the `AUDIT_ALLOW_PRIVATE_ADDRESSES` opt-out
+- [X] T023 [P] [US1] Unit-test credential precedence and reporting in `src/workspace/credentials.rs`: the documented order, and that a `Debug`/`Display` render of any credential never contains the secret
+- [X] T024 [P] [US1] Integration test in `tests/workspace_clone.rs` (`#[ignore]`, self-skipping without network/`git`): clone a public repository, assert repository-relative finding paths, assert `resolved_ref` is a SHA, assert the temporary directory is removed
+- [X] T025 [P] [US1] Add a failure-path case to `tests/workspace_clone.rs`: a scan that errors must still remove its workspace (SC-005) — the failure path is the one that leaks
+- [X] T026 [P] [US1] Write `tests/secret_hygiene.rs` (`#[ignore]`): seed a sentinel into every credential source, run a scan, serialize the whole response, assert the sentinel appears nowhere in logs, execution metadata, findings, or errors (SC-004)
 
 ### Implementation for User Story 1
 
-- [ ] T027 [P] [US1] Implement target expression parsing in `src/workspace/target.rs` per data-model.md, including ref extraction and the local-path-wins disambiguation
-- [ ] T028 [US1] Implement address validation in `src/workspace/target.rs`: resolve the host, reject private/loopback/link-local unless opted in, and bind the resolved address for the connection so DNS rebinding cannot slip past the check (FR-008)
-- [ ] T029 [P] [US1] Implement the `CredentialSource` enum in `src/workspace/credentials.rs` for GitHub App, token, SSH key, and anonymous, with a `name()` for reporting and secrets that cannot be printed
-- [ ] T030 [US1] Implement GitHub App authentication in `src/workspace/credentials.rs`: sign an RS256 JWT with ≤10 minute expiry, exchange it for an installation token, and fetch it immediately before the clone rather than caching it across a scan (R6)
-- [ ] T031 [US1] Implement cloning in `src/workspace/clone.rs` by invoking `git`: shallow by default, ref resolution, and credential delivery that never embeds a secret in a URL or a git remote (FR-028)
-- [ ] T032 [US1] Enforce clone bounds in `src/workspace/clone.rs` — depth, duration, and size — reporting a `tool_error` that names the exceeded budget (FR-006). Bound size git-natively where the remote supports partial clone, so oversized blobs are refused at the remote rather than after landing; back it up with a coarse sampled check of the working tree, reusing the bounded directory walk from `src/selection.rs`. Sampling makes the budget a ceiling that may overshoot by one interval, which is the right trade for a runaway-clone guard
-- [ ] T033 [US1] Implement `Workspace` provisioning and release in `src/workspace/mod.rs`: one workspace per scan shared read-only by all scanners, refcounted release so a straggler or timed-out scanner cannot lose the tree underneath it (FR-005a)
-- [ ] T034 [US1] Implement cleanup and orphan reaping in `src/workspace/mod.rs`: remove on success, failure, and timeout, and reap workspaces left behind by an unclean shutdown (FR-005)
-- [ ] T035 [US1] Implement symlink containment in `src/workspace/mod.rs` so a link inside a clone cannot expose paths outside it to a scanner (FR-009)
-- [ ] T036 [US1] Extend path normalization in `src/parsers/mod.rs` to strip the clone root, so no temporary directory prefix can reach a finding location (FR-007)
-- [ ] T037 [US1] Seed `src/redact.rs` with every resolved credential value at workspace provisioning time, and clear it on release
-- [ ] T038 [US1] Wire workspace provisioning into `run_scan` in `src/server.rs`: resolve the target once per scan, share it across scanners, release it in every exit path
-- [ ] T039 [US1] Add `ref` and `subdir` arguments to `RunScanRequest` in `src/server.rs` per contracts/mcp-tools.md, both optional
-- [ ] T040 [US1] Add the `workspace` block (origin, normalized source, resolved ref, credential source name) to `RunScanResponse` in `src/models.rs`
-- [ ] T041 [US1] Extend `audit_status` in `src/server.rs` with `git` availability and configured credential source names, so a missing `git` is visible before a scan fails late (R5)
-- [ ] T042 [US1] Return an actionable error from `src/workspace/mod.rs` for a private repository with no matching credential, naming the workable credential sources without disclosing whether the repository exists
+- [X] T027 [P] [US1] Implement target expression parsing in `src/workspace/target.rs` per data-model.md, including ref extraction and the local-path-wins disambiguation
+- [X] T028 [US1] Implement address validation in `src/workspace/target.rs`: resolve the host, reject private/loopback/link-local unless opted in, and bind the resolved address for the connection so DNS rebinding cannot slip past the check (FR-008)
+- [X] T029 [P] [US1] Implement the `CredentialSource` enum in `src/workspace/credentials.rs` for GitHub App, token, SSH key, and anonymous, with a `name()` for reporting and secrets that cannot be printed
+- [X] T030 [US1] Implement GitHub App authentication in `src/workspace/credentials.rs`: sign an RS256 JWT with ≤10 minute expiry, exchange it for an installation token, and fetch it immediately before the clone rather than caching it across a scan (R6)
+- [X] T031 [US1] Implement cloning in `src/workspace/clone.rs` by invoking `git`: shallow by default, ref resolution, and credential delivery that never embeds a secret in a URL or a git remote (FR-028)
+- [X] T032 [US1] Enforce clone bounds in `src/workspace/clone.rs` — depth, duration, and size — reporting a `tool_error` that names the exceeded budget (FR-006). Bound size git-natively where the remote supports partial clone, so oversized blobs are refused at the remote rather than after landing; back it up with a coarse sampled check of the working tree, reusing the bounded directory walk from `src/selection.rs`. Sampling makes the budget a ceiling that may overshoot by one interval, which is the right trade for a runaway-clone guard
+- [X] T033 [US1] Implement `Workspace` provisioning and release in `src/workspace/mod.rs`: one workspace per scan shared read-only by all scanners, refcounted release so a straggler or timed-out scanner cannot lose the tree underneath it (FR-005a)
+- [X] T034 [US1] Implement cleanup and orphan reaping in `src/workspace/mod.rs`: remove on success, failure, and timeout, and reap workspaces left behind by an unclean shutdown (FR-005)
+- [X] T035 [US1] Implement symlink containment in `src/workspace/mod.rs` so a link inside a clone cannot expose paths outside it to a scanner (FR-009)
+- [X] T036 [US1] Extend path normalization in `src/parsers/mod.rs` to strip the clone root, so no temporary directory prefix can reach a finding location (FR-007)
+- [X] T037 [US1] Seed `src/redact.rs` with every resolved credential value at workspace provisioning time, and clear it on release
+- [X] T038 [US1] Wire workspace provisioning into `run_scan` in `src/server.rs`: resolve the target once per scan, share it across scanners, release it in every exit path
+- [X] T039 [US1] Add `ref` and `subdir` arguments to `RunScanRequest` in `src/server.rs` per contracts/mcp-tools.md, both optional
+- [X] T040 [US1] Add the `workspace` block (origin, normalized source, resolved ref, credential source name) to `RunScanResponse` in `src/models.rs`
+- [X] T041 [US1] Extend `audit_status` in `src/server.rs` with `git` availability and configured credential source names, so a missing `git` is visible before a scan fails late (R5)
+- [X] T042 [US1] Return an actionable error from `src/workspace/mod.rs` for a private repository with no matching credential, naming the workable credential sources without disclosing whether the repository exists
 
 **Checkpoint**: US1 is fully functional. Remote scanning works on the existing
 stdio + Docker deployment with no other change.

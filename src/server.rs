@@ -11,16 +11,19 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 
 use crate::{
+    config::Config,
     explain::FindingExplainer,
     fixes::FixEngine,
     models::{
         ExecutorStatus, FindingExplanation, ListScannersResponse, NormalizedFinding,
         RunScanResponse, RunStatus, ScanSummary, ScannerRunResult, Severity, SuggestFixesResponse,
-        ToolSelectionPlan,
+        ToolSelectionPlan, WorkspaceStatus,
     },
+    redact::Redactor,
     runner::{ScanOptions, ScanRunner},
     scanners::ScannerRegistry,
     selection::ToolSelector,
+    workspace,
 };
 
 /// Default number of scanner containers allowed to run at once. Each container
@@ -46,6 +49,11 @@ pub struct RunScanRequest {
     pub max_findings: Option<usize>,
     /// Attach raw scanner stdout/stderr even when parsing succeeded.
     pub include_raw_logs: Option<bool>,
+    /// Branch, tag, or commit to scan when `target` is a repository. May also
+    /// be given inline as `target#ref`.
+    pub r#ref: Option<String>,
+    /// Scan only this path within the cloned repository.
+    pub subdir: Option<String>,
     /// Wall-clock ceiling per scanner, overriding each scanner's default.
     pub timeout_secs: Option<u64>,
     /// How many scanner containers may run concurrently.
@@ -85,6 +93,8 @@ pub struct SuggestFixesRequest {
 pub struct AuditStatusResponse {
     /// The active execution backend and whether it is reachable.
     pub executor: ExecutorStatus,
+    /// What the workspace layer can do here.
+    pub workspace: WorkspaceStatus,
     /// Whether the active backend is reachable right now. Scans require it.
     ///
     /// Retained under its original name so existing callers keep working; new
@@ -106,6 +116,7 @@ pub struct AuditMcpServer {
     explainer: Arc<FindingExplainer>,
     fixer: Arc<FixEngine>,
     selector: Arc<ToolSelector>,
+    config: Arc<Config>,
 }
 
 impl AuditMcpServer {
@@ -119,6 +130,10 @@ impl AuditMcpServer {
             explainer: Arc::new(FindingExplainer::new()),
             fixer: Arc::new(FixEngine::new()),
             selector: Arc::new(ToolSelector::new()),
+            config: Arc::new(
+                Config::from_env()
+                    .map_err(|err| anyhow::anyhow!("invalid configuration: {err}"))?,
+            ),
         })
     }
 }
@@ -165,7 +180,35 @@ impl AuditMcpServer {
             summaries.len()
         ));
 
+        // Reported rather than discovered mid-scan: a missing `git` should be
+        // visible before a clone fails late.
+        let git_available = std::process::Command::new("git")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if !git_available {
+            notes.push(
+                "git is not installed, so only local paths can be scanned; repository targets will fail."
+                    .to_string(),
+            );
+        }
+
         Json(AuditStatusResponse {
+            workspace: WorkspaceStatus {
+                git_available,
+                remote_scanning_enabled: self.config.workspace.allow_remote_targets,
+                credential_sources: self
+                    .config
+                    .workspace
+                    .credentials
+                    .source_names()
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+            },
             executor: ExecutorStatus {
                 backend: backend.to_string(),
                 available,
@@ -189,10 +232,6 @@ impl AuditMcpServer {
         &self,
         Parameters(request): Parameters<RunScanRequest>,
     ) -> Result<Json<RunScanResponse>, String> {
-        let selection = self.selector.plan(&request.target, &self.registry);
-        let (mode, scanners_to_run) =
-            resolve_scanners_for_request(&self.registry, &selection, &request)?;
-
         // One preflight beats N identical per-scanner failures.
         if !self.runner.is_available().await {
             return Err(format!(
@@ -201,9 +240,35 @@ impl AuditMcpServer {
             ));
         }
 
+        // Secrets are scoped to this scan, so clearing them when the workspace
+        // is released cannot unregister a concurrent scan's credential.
+        let redactor = Redactor::new();
+        let target_expression = match (&request.r#ref, request.target.contains('#')) {
+            // An explicit `ref` argument and an inline `#ref` mean the same
+            // thing; the explicit one wins when both are given.
+            (Some(reference), _) => format!("{}#{reference}", request.target),
+            (None, _) => request.target.clone(),
+        };
+
+        // One workspace per scan, shared read-only by every scanner it runs.
+        let workspace = Arc::new(
+            workspace::provision(&target_expression, &self.config.workspace, &redactor).await?,
+        );
+        let scan_path = match &request.subdir {
+            Some(subdir) => workspace.root().join(subdir).display().to_string(),
+            None => workspace.scan_path(),
+        };
+
+        // Selection reads the provisioned tree, so `mode=all` detects the
+        // languages of a cloned repository exactly as it would a local one.
+        let selection = self.selector.plan(&scan_path, &self.registry);
+        let (mode, scanners_to_run) =
+            resolve_scanners_for_request(&self.registry, &selection, &request)?;
+
         let options = ScanOptions {
             timeout: request.timeout_secs.map(Duration::from_secs),
             include_raw_logs: request.include_raw_logs.unwrap_or(false),
+            redactor,
         };
         let permits = Arc::new(Semaphore::new(
             request
@@ -220,8 +285,11 @@ impl AuditMcpServer {
                 .get(scanner_name)
                 .expect("scanner is validated before execution")
                 .clone();
-            let target = request.target.clone();
+            let target = scan_path.clone();
             let options = options.clone();
+            // Hold the workspace for as long as this scanner runs, so a
+            // straggler cannot have the tree released underneath it.
+            let workspace = Arc::clone(&workspace);
             async move {
                 // Bound concurrency: every scanner is a container with its own
                 // memory ceiling, so `mode=all` must not fan out without limit.
@@ -234,16 +302,24 @@ impl AuditMcpServer {
                         );
                     }
                 };
-                runner.run_scan(&scanner, &target, &options).await
+                let result = runner.run_scan(&scanner, &target, &options).await;
+                drop(workspace);
+                result
             }
         }))
         .await;
 
         let (runs, summary) = shape_results(runs, &request);
 
+        let workspace_info = workspace.info().clone();
+        // Release before responding: the tree is gone by the time a caller
+        // reads the result, on every path including failure.
+        drop(workspace);
+
         Ok(Json(RunScanResponse {
             mode: mode.as_str().to_string(),
             target: request.target,
+            workspace: workspace_info,
             selection,
             summary,
             runs,
@@ -473,6 +549,8 @@ impl RunScanRequest {
             mode: Some(mode),
             scanner: None,
             scanners: None,
+            r#ref: None,
+            subdir: None,
             min_severity: None,
             max_findings: None,
             include_raw_logs: None,

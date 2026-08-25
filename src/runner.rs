@@ -17,6 +17,7 @@ use uuid::Uuid;
 use crate::executor::{ExecutionRequest, Executor, Termination, docker::DockerExecutor};
 use crate::models::{RunStatus, ScanExecution, ScannerDefinition, ScannerRunResult};
 use crate::parsers::{self, ParseContext};
+use crate::redact::Redactor;
 use crate::scanners::DEFAULT_TIMEOUT_SECS;
 
 /// How much of the log stream is echoed back to the MCP client.
@@ -29,6 +30,9 @@ pub struct ScanOptions {
     pub timeout: Option<Duration>,
     /// Echo raw stdout/stderr back even on success.
     pub include_raw_logs: bool,
+    /// Secrets to strip from anything that becomes a response field. Scoped to
+    /// one scan, so clearing it cannot unregister another scan's credential.
+    pub redactor: Redactor,
 }
 
 /// Runs scanners through an execution backend and normalizes what comes back.
@@ -117,7 +121,19 @@ impl ScanRunner {
             .await?;
 
         let duration_ms = outcome.duration.as_millis() as u64;
-        let excerpt = trim_for_payload(&outcome.combined, LOG_EXCERPT_CHARS);
+        // Redaction happens before truncation, always — truncating first can
+        // cut a secret in half, and half a credential is still a leak.
+        let excerpt = options
+            .redactor
+            .redact_and_trim(&outcome.combined, LOG_EXCERPT_CHARS);
+        // The command is a response field too. A scanner whose invocation
+        // interpolates a credential would otherwise publish it in every
+        // result, which is how this was found: a test made a scanner echo its
+        // token and the token came back in `execution.command`.
+        let command: Vec<String> = command
+            .iter()
+            .map(|argument| options.redactor.redact(argument))
+            .collect();
 
         // An execution the environment killed or never completed is reported
         // with the backend's own words, never as a clean scan.
@@ -128,6 +144,7 @@ impl ScanRunner {
                     status: RunStatus::Timeout,
                     execution: Some(ScanExecution {
                         run_id,
+                        backend: self.backend().to_string(),
                         image: outcome.image,
                         command,
                         status: "timeout".to_string(),
@@ -153,6 +170,7 @@ impl ScanRunner {
                     status: RunStatus::ToolError,
                     execution: Some(ScanExecution {
                         run_id,
+                        backend: self.backend().to_string(),
                         image: outcome.image,
                         command,
                         status: "tool_error".to_string(),
@@ -230,6 +248,7 @@ impl ScanRunner {
             status,
             execution: Some(ScanExecution {
                 run_id,
+                backend: self.backend().to_string(),
                 image: outcome.image,
                 command,
                 status: status.as_str().to_string(),
@@ -353,15 +372,6 @@ pub fn resolve_target(target: &str) -> Result<ResolvedTarget, String> {
         host_dir: parent,
         container_target: format!("./{file_name}"),
     })
-}
-
-fn trim_for_payload(text: &str, max_chars: usize) -> String {
-    if text.chars().count() <= max_chars {
-        return text.to_string();
-    }
-
-    let head = text.chars().take(max_chars).collect::<String>();
-    format!("{head}\n… output truncated at {max_chars} characters …")
 }
 
 #[derive(Debug)]
@@ -581,7 +591,7 @@ mod status_rules {
 mod tests {
     use super::{
         ScanOptions, build_scanner_auth_env, collect_allowlisted_env, required_env_for,
-        resolve_target, scanner_auth_env_config, shell_quote, shell_script_for, trim_for_payload,
+        resolve_target, scanner_auth_env_config, shell_quote, shell_script_for,
     };
 
     fn words(parts: &[&str]) -> Vec<String> {
@@ -641,14 +651,6 @@ mod tests {
         let error = resolve_target("/definitely/not/here").expect_err("should fail");
         assert!(error.contains("does not exist"));
         assert!(resolve_target("   ").is_err());
-    }
-
-    #[test]
-    fn trimming_marks_truncated_output() {
-        let trimmed = trim_for_payload(&"x".repeat(100), 10);
-        assert!(trimmed.starts_with(&"x".repeat(10)));
-        assert!(trimmed.contains("truncated"));
-        assert_eq!(trim_for_payload("short", 10), "short");
     }
 
     #[test]

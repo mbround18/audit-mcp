@@ -8,7 +8,7 @@ anyhow = "1.0.102"
 axum = { version = "0.8.9", optional = true }
 bollard = "0.21.0"
 futures-util = "0.3.32"
-jsonwebtoken = { version = "11.0.0", optional = true }
+jsonwebtoken = "11.0.0"
 k8s-openapi = { version = "0.28.0", features = ["latest"], optional = true }
 kube = { version = "4.2.0", default-features = false, features = ["client", "rustls-tls", "runtime", "derive"], optional = true }
 prometheus = { version = "0.14.0", default-features = false, optional = true }
@@ -18,7 +18,7 @@ schemars = "1.2.1"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 tempfile = "3.27.0"
-tokio = { version = "1.52.3", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1.52.3", features = ["fs", "macros", "process", "rt-multi-thread", "sync", "time"] }
 uuid = { version = "1.23.1", features = ["v4"] }
 
 [features]
@@ -30,7 +30,6 @@ kubernetes = ["dep:kube", "dep:k8s-openapi"]
 # Serve MCP over authenticated streamable HTTP alongside stdio.
 http = [
     "dep:axum",
-    "dep:jsonwebtoken",
     "dep:prometheus",
     "rmcp/transport-streamable-http-server",
 ]

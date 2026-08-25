@@ -91,6 +91,7 @@ async fn check(runner: &ScanRunner, scanner: &str) -> Option<String> {
         // Keep a stuck scanner from stalling the whole sweep.
         timeout: Some(std::time::Duration::from_secs(420)),
         include_raw_logs: true,
+        ..Default::default()
     };
     let result = runner
         .run_scan(&definition, &fixture_for(scanner), &options)

@@ -329,6 +329,55 @@ async fn timeout_is_enforced_and_reported_as_a_timeout() {
     assert!(execution.exit_code.is_none());
 }
 
+#[tokio::test]
+#[ignore]
+async fn scans_a_repository_that_was_never_checked_out() {
+    require_docker!();
+    use std::net::ToSocketAddrs;
+    if ("github.com", 443).to_socket_addrs().is_err() {
+        eprintln!("skipping: github.com is not resolvable");
+        return;
+    }
+
+    let server = AuditMcpServer::new().expect("server should initialize");
+    let response = server
+        .run_scan(Parameters(
+            // A URL, not a path. Nothing is checked out locally.
+            RunScanRequest::new(
+                "https://github.com/octocat/Hello-World",
+                RunScanMode::Single,
+            )
+            .with_scanner("gitleaks"),
+        ))
+        .await
+        .expect("run_scan should succeed");
+
+    let workspace = &response.0.workspace;
+    assert_eq!(workspace.origin, "git_https");
+    assert_eq!(workspace.credential_source.as_deref(), Some("anonymous"));
+    let resolved = workspace
+        .resolved_ref
+        .as_deref()
+        .expect("a cloned scan reports the commit it scanned");
+    assert_eq!(resolved.len(), 40, "a full commit sha");
+
+    let run = &response.0.runs[0];
+    assert!(
+        !matches!(run.status, RunStatus::ToolError | RunStatus::Timeout),
+        "scan of a cloned repository failed: {:?}",
+        run.error
+    );
+
+    // No temporary directory prefix may reach a finding location.
+    for finding in &run.findings {
+        let path = finding.location.path.as_deref().unwrap_or_default();
+        assert!(
+            !path.contains("audit-workspace-") && !path.starts_with("/tmp"),
+            "a clone path leaked into a finding location: {path}"
+        );
+    }
+}
+
 /// These don't touch Docker at all, so they run unconditionally and act as a
 /// fast smoke test of the non-container tool surface.
 #[tokio::test]
@@ -369,5 +418,11 @@ async fn status_reports_catalog_and_docker_reachability() {
     assert!(status.0.normalized_scanner_count > 0);
     assert!(status.0.normalized_scanner_count < status.0.scanner_count);
     assert_eq!(status.0.docker_available, docker_available().await);
+    assert_eq!(status.0.executor.backend, "docker");
     assert!(!status.0.notes.is_empty());
+
+    // Credential sources are reported by name only, never by value.
+    let serialized = serde_json::to_string(&status.0).expect("status serializes");
+    assert!(!serialized.contains("ghp_"));
+    assert!(status.0.workspace.remote_scanning_enabled);
 }
