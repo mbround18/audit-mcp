@@ -1,0 +1,111 @@
+# audit-mcp
+
+> audit-mcp: run 95+ static analysis and security scanners in isolated containers, get normalized findings back
+
+An [MCP](https://modelcontextprotocol.io/) server. Point it at a directory or a
+git repository and it runs the right scanners for that codebase, returning
+structured findings — rule ID, severity, file, line, remediation — rather than
+raw tool output. Nothing needs to be installed locally except Docker.
+
+Source: <https://github.com/mbround18/audit-mcp>
+
+## Quickstart for an AI agent
+
+If you have been asked to wire `audit-mcp` into a project:
+
+```sh
+git clone https://github.com/mbround18/audit-mcp && cd audit-mcp
+cargo build --release
+```
+
+Then add it to the MCP client config (`.mcp.json` for Claude Code):
+
+```json
+{ "mcpServers": { "audit": { "command": "/path/to/audit-mcp" } } }
+```
+
+Restart the client. Call `audit_status` first — it reports whether Docker is
+reachable, whether `git` is available, and which credentials are configured.
+
+## Reading a result
+
+Every scanner run reports a `status`, and the distinction matters:
+
+- `clean` — ran, output parsed, nothing found
+- `findings` — ran, found something
+- `unparsed` — ran, but no parser recognized its output; raw logs attached.
+  **Not** the same as clean: the scanner may have failed silently
+- `tool_error` — could not run; logs attached
+- `timeout` — exceeded its budget and was killed
+- `skipped` — deliberately not run, usually a missing credential
+
+Do not treat `unparsed` as a clean bill of health. Read the attached logs or
+say the scanner could not be verified.
+
+Each finding carries a `fingerprint` (`scanner:rule:path:line`) that is stable
+across runs, so results can be diffed and deduplicated.
+
+## run_scan
+
+Run scanners and return normalized findings with a severity rollup.
+
+- `target` — a local path, an https/ssh git URL, or `owner/repo`. An existing
+  local path always wins. Append `#ref` to pick a branch, tag, or commit
+- `mode` — `single` (default, needs `scanner`), `many` (needs `scanners[]`), or
+  `all` (auto-selects by walking the target for ecosystem markers)
+- `scanner` / `scanners` — which scanners to run
+- `ref` — branch, tag, or commit, when `target` is a repository
+- `subdir` — scan only this path within the repository
+- `min_severity` — drop findings below `info`/`low`/`medium`/`high`/`critical`
+- `max_findings` — cap results (default 200); the budget goes to the most
+  severe findings first, so a truncated list keeps what matters
+- `include_raw_logs` — attach raw stdout/stderr even on success
+- `timeout_secs` — per-scanner wall-clock ceiling
+- `max_parallel` — concurrent scanner containers (default 4)
+
+Prefer `mode=all` with `min_severity` for a first pass on an unfamiliar
+repository; prefer `mode=single` when the user named a tool.
+
+## list_scanners
+
+The catalog: name, description, categories, whether output is `normalized`
+into structured findings, and any `required_env` credentials. No arguments.
+
+## audit_status
+
+Whether the execution backend is reachable, whether `git` is installed, which
+credential sources are configured, and which transport is active. No arguments.
+Call this when a scan fails — it usually explains why in one line.
+
+## explain_finding
+
+Plain-language explanation and remediation for a `scanner` + `id` pair. The
+`id` is the tool's own rule identifier (`SC2086`, `B602`, `DL3006`), so it can
+be passed straight through from `run_scan` output.
+
+## suggest_fixes
+
+Minimal fix steps from an array of `findings`.
+
+## Scanning a repository nobody has checked out
+
+Public repositories need no configuration. Private ones use, in order: a GitHub
+App (`GITHUB_APP_ID` + `GITHUB_APP_PRIVATE_KEY` + `GITHUB_APP_INSTALLATION_ID`),
+`GITHUB_TOKEN`, an SSH key (`SSH_PRIVATE_KEY` + `SSH_KNOWN_HOSTS`), or a
+logged-in `gh` CLI. The response names the source used, never the value, and
+the clone is deleted when the scan ends.
+
+## Execution backends
+
+`AUDIT_EXECUTOR=docker` (default) runs each scanner in a local container.
+`AUDIT_EXECUTOR=kubernetes` runs each as a Job — for deployments with no Docker
+socket to hand out. Both produce identical findings. The Kubernetes backend
+needs a repository target, since a cluster cannot see the local filesystem.
+
+## Guarantees worth relying on
+
+- Read-only workspace, no privilege escalation, capabilities dropped, memory
+  ceiling, and a wall-clock timeout on every scanner
+- Credentials never appear in any response field
+- Container and clone paths never appear in a finding location
+- A scanner that could not run is never reported as clean

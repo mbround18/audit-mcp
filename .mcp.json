@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "audit": {
+      "command": "./target/release/audit-mcp"
+    },
+    "paws": {
+      "args": [
+        "mcp",
+        "serve"
+      ],
+      "command": "paws"
+    }
+  }
+}

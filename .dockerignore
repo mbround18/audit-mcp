@@ -1,0 +1,11 @@
+target/
+.git/
+.github/
+.specify/
+.claude/
+specs/
+docs/
+tests/fixtures/
+*.md
+Dockerfile
+.dockerignore

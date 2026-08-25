@@ -2,6 +2,17 @@
 name = "audit-mcp"
 version = "0.2.0"
 edition = "2024"
+rust-version = "1.88"
+description = "An MCP server that runs 95+ static analysis and security scanners in isolated containers and returns normalized findings"
+authors = ["MBRound18"]
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/mbround18/audit-mcp"
+homepage = "https://github.com/mbround18/audit-mcp"
+documentation = "https://github.com/mbround18/audit-mcp/tree/main/docs"
+keywords = ["mcp", "security", "sast", "scanner", "audit"]
+categories = ["development-tools", "command-line-utilities"]
+exclude = ["specs/", "tests/fixtures/", ".specify/", ".claude/"]
 
 [dependencies]
 anyhow = "1.0.102"

@@ -1,39 +1,73 @@
 # audit-mcp
 
-An [MCP](https://modelcontextprotocol.io/) server that runs static analysis and security scanners inside isolated Docker containers and returns normalized findings with remediation context.
+[![CI](https://github.com/mbround18/audit-mcp/actions/workflows/paws.yml/badge.svg)](https://github.com/mbround18/audit-mcp/actions/workflows/paws.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Point it at any directory and your AI assistant can audit it — without installing a single scanner locally.
+An [MCP](https://modelcontextprotocol.io/) server that runs 95+ static analysis
+and security scanners inside isolated containers and returns **normalized
+findings** — rule IDs, severities, file and line, remediation — instead of a
+wall of tool output.
 
-It is built to **run anyway**: the server starts without Docker, `mode=all` figures out the languages from what is actually in the directory, every scanner has a wall-clock budget, and a scanner that cannot run says so instead of reporting a clean bill of health.
+Point your assistant at a directory, or at a repository nobody has checked out,
+and it can audit it without a single scanner installed locally.
 
-Point it at a path, or at a repository you have never checked out. Run the scanners in local Docker containers, or as Kubernetes Jobs in a cluster.
+```jsonc
+// "run_scan" against a repo you don't have on disk
+{ "target": "owner/repo#main", "mode": "all", "min_severity": "high" }
+```
 
-## Features
+```jsonc
+// what comes back
+{
+  "workspace": { "origin": "git_https", "resolved_ref": "a1b2c3d…", "credential_source": "gh_cli" },
+  "summary": { "total_findings": 14, "by_severity": { "critical": 1, "high": 13 }, … },
+  "runs": [{
+    "scanner": "semgrep",
+    "status": "findings",
+    "findings": [{
+      "id": "python.lang.security.audit.exec-detected",
+      "severity": "high",
+      "location": { "path": "app/handler.py", "line": 42 },
+      "remediation": "Avoid exec(); use explicit dispatch.",
+      "fingerprint": "semgrep:python.lang.security.audit.exec-detected:app/handler.py:42"
+    }]
+  }]
+}
+```
 
-- **95+ scanners** across Rust, Go, Python, Node, IaC/Kubernetes, Java, Ruby, PHP, .NET, C/C++, Kotlin, Elixir, SQL, and Shell — plus a cross-language security layer (semgrep, gitleaks, grype, osv-scanner) that runs on every target
-- **Real normalized findings** — a generic SARIF parser plus tool-native JSON parsers turn scanner output into structured findings with rule IDs, severities, file/line locations, remediation, and stable fingerprints you can diff across runs
-- **Honest results** — every run reports `clean`, `findings`, `unparsed`, `tool_error`, `timeout`, or `skipped`. "Found nothing" and "could not run" are never confused
-- **Fully isolated** — every scanner runs in its own ephemeral Docker container with a read-only workspace mount, `no-new-privileges`, and all Linux capabilities dropped
-- **Bounded** — per-scanner timeouts, a container concurrency cap, and severity filtering / result caps so a large repo cannot hang the call or flood your context
-- **Persistent cache** — named Docker volumes share downloaded packages and compiled artifacts across runs so repeated scans are fast
-- **Remote repositories** — `target` accepts a git URL or `owner/repo`; the server clones it, scans it, and deletes it. Public repositories need no configuration
-- **Two execution backends** — local Docker by default, or Kubernetes Jobs when there is no Docker socket to hand out. Both produce identical findings, and a test enforces that
-- **MCP-native** — exposes `list_scanners`, `audit_status`, `run_scan`, `explain_finding`, and `suggest_fixes` as structured tools any MCP client can call
-- **Content-based language detection** — `mode=all` walks the target directory for manifests and source files, so a polyglot repo gets every relevant scanner
+---
+
+## Why this one
+
+**A result never lies.** Most scanner wrappers can't tell "found nothing" from
+"couldn't run" — a crashed tool and a clean repo look identical. Every run here
+reports one of `clean`, `findings`, `unparsed`, `tool_error`, `timeout`, or
+`skipped`, and a scanner that produced no report it was asked for is never
+called clean.
+
+**Findings are real findings.** A generic SARIF parser plus tool-native JSON
+parsers turn output into structured findings with stable fingerprints
+(`scanner:rule:path:line`, no run IDs) you can diff across runs and deduplicate
+across scanners.
+
+**It runs anyway.** The server starts without Docker. `mode=all` infers
+languages from what's actually in the directory, not from the path string.
+Every scanner has a wall-clock budget, concurrency is capped, and findings are
+severity-sorted and capped so a big repo can't flood your context.
+
+**Isolation is the product.** Read-only workspace, `no-new-privileges`,
+capabilities dropped, memory ceiling, per-scanner credential allowlist, and a
+redaction pass so a credential can't reach a response field.
+
+---
 
 ## Requirements
 
-- Rust 1.88+ (build only)
-- Docker (running daemon, accessible via the default socket)
+- **Docker** — a running daemon (or a Kubernetes cluster; see below)
+- **git** — only for scanning remote repositories
+- **Rust 1.88+** — to build from source
 
-## Auth-required scanners
-
-Some scanners require credentials supplied as host environment variables. `audit-mcp` only passes through an allowlisted set per scanner.
-
-- `snyk`, `snyk-java`, `dotnet-snyk`: requires `SNYK_TOKEN` (optionally passes `SNYK_API`, `SNYK_CFG_ORG`)
-- `dotnet-sonarscanner`: requires `SONAR_TOKEN` and `SONAR_HOST_URL` (optionally passes `SONAR_PROJECT_KEY`, `SONAR_ORGANIZATION`)
-
-## Installation
+## Install
 
 ```bash
 git clone https://github.com/mbround18/audit-mcp
@@ -41,187 +75,236 @@ cd audit-mcp
 cargo build --release
 ```
 
-The binary is at `target/release/audit-mcp`. It communicates over stdio, so it is wired up as an MCP server in your client's configuration file.
+The binary lands at `target/release/audit-mcp` and speaks MCP over stdio.
 
-### Claude Code / Claude Desktop
+Optional features, both **off by default** so a default build carries none of
+their dependencies:
+
+```bash
+cargo build --release --features kubernetes   # run scanners as Kubernetes Jobs
+cargo build --release --features http         # serve MCP over authenticated HTTP
+```
+
+### Wire it into a client
+
+**Claude Code / Claude Desktop** — add to your MCP config:
 
 ```json
 {
   "mcpServers": {
-    "audit": {
-      "command": "/path/to/audit-mcp"
-    }
+    "audit": { "command": "/path/to/audit-mcp" }
   }
 }
 ```
 
+Then ask for an audit in plain language: *"scan this repo for security issues"*,
+*"audit github.com/owner/repo and show me only the high-severity findings"*.
+
+---
+
 ## Tools
 
-### `list_scanners`
-
-Returns the full scanner catalog with names, descriptions, categories, whether each scanner's output is **normalized**, and any credentials it requires. No arguments.
-
-### `audit_status`
-
-Reports whether a Docker daemon is reachable and how much of the catalog produces structured findings. Answers even with no daemon running — call it first when a scan fails. No arguments.
+| Tool | What it does |
+| ---- | ------------ |
+| `run_scan` | Run scanners against a path or repository; returns normalized findings and a severity rollup |
+| `list_scanners` | The catalog: names, categories, whether output is normalized, credentials required |
+| `audit_status` | Whether the execution backend is reachable, what `git` and credentials are available, which transport is active |
+| `explain_finding` | Plain-language explanation and remediation for a scanner + rule ID |
+| `suggest_fixes` | Minimal fix steps from a set of findings |
 
 ### `run_scan`
 
-| Field              | Type                           | Description                                                        |
-| ------------------ | ------------------------------ | ------------------------------------------------------------------ |
-| `target`           | `string`                       | Absolute path to a directory (or a single file) to scan            |
-| `mode`             | `"single" \| "many" \| "all"`  | How scanners are selected (default: `single`)                      |
-| `scanner`          | `string`                       | Scanner name — required when `mode=single`                         |
-| `scanners`         | `string[]`                     | Scanner names — required when `mode=many`                          |
-| `ref`              | `string`                       | Branch, tag, or commit when `target` is a repository (or inline as `target#ref`) |
-| `subdir`           | `string`                       | Scan only this path within the repository                          |
-| `min_severity`     | `string`                       | Drop findings below this level (`info`/`low`/`medium`/`high`/`critical`) |
-| `max_findings`     | `number`                       | Cap findings returned (default 200; the budget goes to the most severe first) |
-| `include_raw_logs` | `boolean`                      | Attach raw stdout/stderr even when parsing succeeded               |
-| `timeout_secs`     | `number`                       | Wall-clock ceiling per scanner, overriding its default             |
-| `max_parallel`     | `number`                       | Concurrent scanner containers (default 4)                          |
+| Field | Type | Description |
+| ----- | ---- | ----------- |
+| `target` | `string` | A path, a git URL, or `owner/repo` |
+| `mode` | `"single" \| "many" \| "all"` | How scanners are chosen (default `single`) |
+| `scanner` / `scanners` | `string` / `string[]` | Required for `single` / `many` |
+| `ref` | `string` | Branch, tag, or commit (or inline as `target#ref`) |
+| `subdir` | `string` | Scan only this path within the repository |
+| `min_severity` | `string` | Drop findings below `info`/`low`/`medium`/`high`/`critical` |
+| `max_findings` | `number` | Cap results (default 200); the budget goes to the most severe first |
+| `include_raw_logs` | `boolean` | Attach raw stdout/stderr even on success |
+| `timeout_secs` | `number` | Per-scanner wall-clock ceiling |
+| `max_parallel` | `number` | Concurrent scanner containers (default 4) |
 
-`mode=all` auto-selects scanners by walking the target directory for ecosystem markers. A file target mounts its parent directory and scopes the scanner to that one file.
-
-#### Targets
+**Targets**
 
 | Form | Example |
 | ---- | ------- |
 | Local path | `/home/me/project` |
-| HTTPS git URL | `https://github.com/owner/repo` |
-| SSH git URL | `git@github.com:owner/repo.git` |
-| Shorthand | `owner/repo` (GitHub) |
-| With a ref | any of the above plus `#main`, `#v1.2.3`, or `#a1b2c3d` |
+| HTTPS URL | `https://github.com/owner/repo` |
+| SSH URL | `git@github.com:owner/repo.git` |
+| Shorthand | `owner/repo` |
+| With a ref | any of the above + `#main`, `#v1.2.3`, `#a1b2c3d` |
 
 An existing local path always wins, so nothing you scan today changes meaning.
 
-The response reports a `workspace` block naming the origin, the normalized source URL, the exact commit scanned, and which credential source was used — the source's *name*, never its value.
+**Run statuses**
 
-#### Run statuses
+| Status | Meaning |
+| ------ | ------- |
+| `clean` | Ran, output parsed, nothing to report |
+| `findings` | Ran and reported at least one finding |
+| `unparsed` | Ran, but no parser recognized its output — raw logs attached |
+| `tool_error` | Could not run; logs attached |
+| `timeout` | Exceeded its budget and was killed |
+| `skipped` | Deliberately not run (missing credentials) |
 
-Every entry in `runs[]` carries a `status`:
+---
 
-| Status       | Meaning                                                                       |
-| ------------ | ----------------------------------------------------------------------------- |
-| `clean`      | Ran, output parsed, nothing to report                                          |
-| `findings`   | Ran and reported at least one finding                                          |
-| `unparsed`   | Ran, but no parser exists for its output — raw logs are attached               |
-| `tool_error` | Could not run (bad flag, missing tool, unexpected exit code); logs attached     |
-| `timeout`    | Exceeded its wall-clock budget and was killed                                  |
-| `skipped`    | Deliberately not run (e.g. required credentials absent)                        |
+## Scanning remote repositories
 
-The response also carries a `summary` with a severity rollup, per-status scanner counts, and notes about anything that was deduplicated, filtered, or truncated.
-
-### `explain_finding`
-
-Takes a scanner name and finding ID, returns a plain-language explanation and remediation steps. A finding's `id` is the tool's own rule identifier (`SC2086`, `B602`, `DL3006`), so it can be passed straight through from `run_scan` output.
-
-### `suggest_fixes`
-
-Takes an array of normalized findings, returns minimal fix suggestions.
-
-## Remote repositories
-
-Set none of these and public repositories still clone. Credentials are used in this order, and only ever for the transport they can authenticate:
+Public repositories need **no configuration**. For private ones, credentials
+are tried in this order and only ever for the transport they can authenticate:
 
 | Variable(s) | Use |
 | ----------- | --- |
-| `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_APP_INSTALLATION_ID` | GitHub App installation token, minted fresh per scan. All three or none |
+| `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_APP_INSTALLATION_ID` | GitHub App installation token, minted per scan. All three or none |
 | `GITHUB_TOKEN` | Token or PAT over HTTPS |
-| `SSH_PRIVATE_KEY` + `SSH_KNOWN_HOSTS` | git over SSH. Host key checking is never silently disabled, so both are required |
-| _(none)_ | If the `gh` CLI is installed and logged in, its token is borrowed for GitHub targets. Set `AUDIT_USE_GH_CLI=false` to opt out |
+| `SSH_PRIVATE_KEY` + `SSH_KNOWN_HOSTS` | git over SSH — host key checking is never silently disabled, so both are required |
+| _(nothing configured)_ | If the [`gh` CLI](https://cli.github.com/) is logged in, its token is borrowed for GitHub targets. `AUDIT_USE_GH_CLI=false` opts out |
 
-Bounds, all overridable: shallow clone (`AUDIT_CLONE_DEPTH=1`), 300 s (`AUDIT_CLONE_TIMEOUT_SECS`), 2 GiB (`AUDIT_CLONE_MAX_BYTES`). A target resolving to a private, loopback, or link-local address is refused unless `AUDIT_ALLOW_PRIVATE_ADDRESSES=true`; `AUDIT_ALLOW_REMOTE_TARGETS=false` disables cloning entirely.
+The response always names the source used (`credential_source`), never the
+value. The clone is removed when the scan ends — including on failure and
+timeout — and workspaces orphaned by a killed process are reaped at startup.
 
-The clone is removed when the scan ends — including when it fails or times out — and workspaces orphaned by a killed process are reaped at startup.
+**Bounds**, all overridable: shallow clone (`AUDIT_CLONE_DEPTH`), 300 s
+(`AUDIT_CLONE_TIMEOUT_SECS`), 2 GiB (`AUDIT_CLONE_MAX_BYTES`). A target
+resolving to a private, loopback, or link-local address is refused unless
+`AUDIT_ALLOW_PRIVATE_ADDRESSES=true`. `AUDIT_ALLOW_REMOTE_TARGETS=false`
+disables cloning entirely.
 
-## Kubernetes execution
+## Running in Kubernetes
+
+For deployments with no Docker socket to hand out — mounting one would give
+every scanner image root on the node.
 
 ```bash
 cargo build --release --features kubernetes
 AUDIT_EXECUTOR=kubernetes AUDIT_K8S_NAMESPACE=audit audit-mcp
 ```
 
-Each scanner becomes a `batch/v1` Job. Cluster credentials come from the in-cluster ServiceAccount when present, otherwise your kubeconfig. The workspace arrives through a git-clone initContainer writing into an `emptyDir` the scanner mounts read-only — no host path, no PVC, and no Docker socket, which is a stronger posture than the local default.
+Each scanner becomes a `batch/v1` Job. Cluster credentials come from the
+in-cluster ServiceAccount when present, otherwise your kubeconfig. The
+workspace arrives via a git-clone initContainer writing into an `emptyDir` the
+scanner mounts read-only — no host path, no PVC, no socket.
 
-Because a cluster cannot see your filesystem, this backend needs a **repository** target; a local path is refused with an explanation rather than scanned as an empty directory. Clone credentials are delivered through a Secret, never the Job spec, which is readable by anyone with `get jobs` in the namespace.
+Because a cluster can't see your filesystem, this backend needs a **repository**
+target; a local path is refused with an explanation rather than scanned as an
+empty directory. Clone credentials are delivered through a Secret, never the Job
+spec (which anyone with `get jobs` can read).
 
-Operator settings: `AUDIT_K8S_SERVICE_ACCOUNT`, `AUDIT_K8S_CPU_REQUEST` / `AUDIT_K8S_CPU_LIMIT`, `AUDIT_K8S_MEMORY_REQUEST` / `AUDIT_K8S_MEMORY_LIMIT`, `AUDIT_K8S_NODE_SELECTOR`, `AUDIT_K8S_TOLERATIONS`, `AUDIT_K8S_IMAGE_PULL_SECRETS`, `AUDIT_K8S_JOB_TTL_SECONDS`. See [contracts/configuration.md](specs/001-hosted-execution-modes/contracts/configuration.md).
+Operator knobs: `AUDIT_K8S_SERVICE_ACCOUNT`, `AUDIT_K8S_CPU_REQUEST`/`_LIMIT`,
+`AUDIT_K8S_MEMORY_REQUEST`/`_LIMIT`, `AUDIT_K8S_NODE_SELECTOR`,
+`AUDIT_K8S_TOLERATIONS`, `AUDIT_K8S_IMAGE_PULL_SECRETS`,
+`AUDIT_K8S_JOB_TTL_SECONDS`.
 
-## Supported languages and scanners
+## Hosted HTTP transport (preview)
 
-| Language                   | Scanners                                                                                                                                                                                        |
-| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Rust                       | `cargo-audit`, `cargo-clippy`, `cargo-deny`, `cargo-fmt`, `cargo-machete`, `cargo-bloat`, `cargo-tarpaulin`, `cargo-llvm-cov`, `cargo-outdated`, `cargo-mutants`, `cargo-geiger`, `cargo-udeps` |
-| Go                         | `govulncheck`, `gosec`, `golangci-lint`, `staticcheck`, `goimports`, `gocyclo`, `nilaway`, `ineffassign`, `go-carpet`, `revive`, `errcheck`                                                     |
-| Python                     | `bandit`, `safety`, `ruff`, `black`, `mypy`, `pip-audit`, `vulture`, `flake8`, `isort`, `radon`                                                                                                 |
-| Node                       | `knip`, `snyk`, `retire`, `auditjs`, `eslint`, `prettier`, `depcheck`, `license-checker`, `oxlint`, `npm-audit`, plus `lighthouse` and `bundlephobia` (catalog-only, see below)                |
-| IaC/K8s                    | `checkov`, `tfsec`, `kube-linter`, `trivy-config`, `hadolint`, `kubesec`, `conftest`, `terrascan`                                                                                               |
-| Cross-language (always-on) | `semgrep`, `gitleaks`, `osv-scanner`, `grype`, `bearer`                                                                                                                                         |
-| Java                       | `spotbugs`, `pmd`, `checkstyle`, `snyk-java`, `google-java-format`, `dependency-check`                                                                                                          |
-| Ruby                       | `brakeman`, `bundler-audit`, `rubocop`, `pronto`, `debride`, `flay`, `flog`, `standardrb`, `license_finder`                                                                                     |
-| PHP                        | `phpstan`, `psalm`, `phpcs`, `rector`, `enlightn`                                                                                                                                               |
-| .NET                       | `dotnet-format`, `roslyn-analyzers`, `dotnet-sonarscanner`, `dotnet-snyk`, `jb-inspectcode`                                                                                                     |
-| C/C++                      | `clang-tidy`, `cppcheck`, `clang-format`, `flawfinder`                                                                                                                                          |
-| Shell                      | `shellcheck`                                                                                                                                                                                    |
-| Kotlin                     | `detekt`, `ktlint`                                                                                                                                                                              |
-| Elixir                     | `credo`, `sobelow`                                                                                                                                                                              |
-| SQL                        | `sqlfluff`                                                                                                                                                                                      |
+```bash
+cargo build --release --features http
+AUDIT_TRANSPORT=http \
+AUDIT_RESOURCE_URL=https://audit.example.com/mcp \
+AUDIT_OAUTH_ISSUER=https://idp.example.com \
+audit-mcp
+```
 
-`lighthouse` and `bundlephobia` take a URL or a package name rather than a repository path, so they stay in the catalog for explicit `mode=single` use but are never auto-selected by `mode=all`.
+Serves MCP over streamable HTTP with the server acting as an OAuth 2.1 Resource
+Server: RFC 9728 metadata at `/.well-known/oauth-protected-resource`, a
+`WWW-Authenticate` challenge, and JWT validation against your provider's JWKS
+including **audience** — a token minted by the same issuer for another service
+is rejected. There is no unauthenticated HTTP mode.
 
-## Normalized vs. raw output
+> **Preview limitation.** Repository targets are refused on this transport.
+> Per-caller authorization isn't wired up yet, and using the server's own
+> credential on a caller's behalf would let them read repositories they can't.
+> Local paths work; stdio is unaffected. `audit_status` reports
+> `remote_targets_supported: false`.
 
-Roughly a third of the catalog emits SARIF or tool-native JSON that `audit-mcp` parses into structured findings; the rest returns raw logs with status `unparsed`. `list_scanners` marks which is which via the `normalized` field, and `audit_status` reports the overall coverage. Adding a parser is the main way to extend the project — see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+Full configuration reference:
+[`specs/001-hosted-execution-modes/contracts/configuration.md`](specs/001-hosted-execution-modes/contracts/configuration.md).
+
+---
+
+## Scanners
+
+| Language | Scanners |
+| -------- | -------- |
+| Rust | `cargo-audit`, `cargo-clippy`, `cargo-deny`, `cargo-fmt`, `cargo-machete`, `cargo-bloat`, `cargo-tarpaulin`, `cargo-llvm-cov`, `cargo-outdated`, `cargo-mutants`, `cargo-geiger`, `cargo-udeps` |
+| Go | `govulncheck`, `gosec`, `golangci-lint`, `staticcheck`, `goimports`, `gocyclo`, `nilaway`, `ineffassign`, `go-carpet`, `revive`, `errcheck` |
+| Python | `bandit`, `safety`, `ruff`, `black`, `mypy`, `pip-audit`, `vulture`, `flake8`, `isort`, `radon` |
+| Node | `knip`, `snyk`, `retire`, `auditjs`, `eslint`, `prettier`, `depcheck`, `license-checker`, `oxlint`, `npm-audit` |
+| IaC / K8s | `checkov`, `tfsec`, `kube-linter`, `trivy-config`, `hadolint`, `kubesec`, `conftest`, `terrascan` |
+| Cross-language | `semgrep`, `gitleaks`, `osv-scanner`, `grype`, `bearer` |
+| Java | `spotbugs`, `pmd`, `checkstyle`, `snyk-java`, `google-java-format`, `dependency-check` |
+| Ruby | `brakeman`, `bundler-audit`, `rubocop`, `pronto`, `debride`, `flay`, `flog`, `standardrb`, `license_finder` |
+| PHP | `phpstan`, `psalm`, `phpcs`, `rector`, `enlightn` |
+| .NET | `dotnet-format`, `roslyn-analyzers`, `dotnet-sonarscanner`, `dotnet-snyk`, `jb-inspectcode` |
+| C/C++ | `clang-tidy`, `cppcheck`, `clang-format`, `flawfinder` |
+| Shell / Kotlin / Elixir / SQL | `shellcheck` · `detekt`, `ktlint` · `credo`, `sobelow` · `sqlfluff` |
+
+Roughly a third emit SARIF or tool-native JSON that gets parsed into structured
+findings; the rest return raw logs with status `unparsed`. `list_scanners`
+marks which is which. See [docs/SCANNERS.md](docs/SCANNERS.md).
+
+`lighthouse` and `bundlephobia` are catalog-only — they take a URL or package
+name, not a repository path, so `mode=all` never selects them.
+
+### Auth-required scanners
+
+`snyk`, `snyk-java`, `dotnet-snyk` need `SNYK_TOKEN`. `dotnet-sonarscanner`
+needs `SONAR_TOKEN` and `SONAR_HOST_URL`. Without them those scanners are
+`skipped` with a reason — never a failure.
+
+---
 
 ## How it works
 
 ```mermaid
 flowchart TD
-    A["MCP client (Claude, etc.)"] -->|"run_scan target + scanner"| B["AuditMcpServer (stdio)"]
-    B -->|"resolves scanner definition"| C["DockerScannerRunner"]
-    C -->|"pulls image if needed<br/>mounts target read-only at /workspace<br/>mounts shared cache volumes<br/>applies security constraints<br/>enforces a wall-clock timeout"| D["Docker container (ephemeral)"]
-    D -->|"stdout/stderr"| P["parsers: SARIF or tool JSON"]
-    P --> E["NormalizedFinding[] + RunStatus"]
-    E -->|"dedup, filter, sort, cap, summarize"| A
+    A["MCP client"] -->|run_scan| B["AuditMcpServer"]
+    B --> W["workspace/<br/>local path, or clone + cleanup"]
+    W --> C["ScanRunner<br/>bounded fan-out"]
+    C --> D["Executor<br/>docker | kubernetes"]
+    D -->|"read-only mount, caps dropped,<br/>memory ceiling, wall-clock timeout"| E["ephemeral container / Job"]
+    E -->|stdout| P["parsers<br/>SARIF or tool JSON"]
+    P --> F["NormalizedFinding[] + RunStatus"]
+    F -->|"dedup, filter, sort, cap, summarize"| A
 ```
 
-Cache volumes are named `audit-cargo-home`, `audit-go-mod-cache`, `audit-uv-tools`, etc. — one set per language, shared across all scanners that use the same ecosystem. Per-scanner build artifact volumes (`audit-target-<scanner>`) prevent cross-scanner collisions.
+Named Docker volumes cache packages and compiled artifacts across runs, so
+repeat scans are fast. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and
+[docs/CACHE.md](docs/CACHE.md).
 
-## Development
+## Documentation
+
+| Document | Contents |
+| -------- | -------- |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Module structure, the executor seam, why status lives where it does |
+| [docs/SCANNERS.md](docs/SCANNERS.md) | Every scanner, base images, exit codes, normalization |
+| [docs/SECURITY.md](docs/SECURITY.md) | Isolation model and threat considerations |
+| [docs/CACHE.md](docs/CACHE.md) | Cache volume strategy |
+| [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) | Building, testing, and adding scanners |
+
+## For AI agents
+
+[`llms.txt`](llms.txt) describes the tool surface, how to read a `status`, and
+the guarantees worth relying on — written to be pasted into a context window or
+fetched directly.
+
+## Contributing
+
+See [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md). CI runs on
+[paws](https://github.com/mbround18/paws), so `paws ci --toolchain rust`
+reproduces it exactly on your machine. `.mcp.json` registers both `paws` and
+`audit-mcp` itself, so an assistant working in this repo can audit it.
+
+A container image is available for the Kubernetes deployment:
 
 ```bash
-# type-check
-cargo check
-
-# run tests (fast, no Docker/network required)
-cargo test
-
-# run end-to-end tests against real scanner containers (needs Docker + network)
-cargo test --test e2e_scan -- --ignored
-
-# verify scanner command templates actually execute in their images
-cargo test --test scanner_smoke -- --ignored --nocapture
-
-# clone paths against a real remote, and the secret-leak sentinel
-cargo test --test workspace_clone -- --ignored
-cargo test --test secret_hygiene -- --ignored
-
-# Docker/Kubernetes parity (needs a cluster and a usable namespace)
-cargo test --features kubernetes --test executor_parity -- --ignored
-
-# lint
-cargo clippy -- -D warnings
-
-# format check
-cargo fmt -- --check
-
-# run the server (reads MCP messages from stdin)
-cargo run
+docker build -t audit-mcp .        # or: paws docker --image ghcr.io/you/audit-mcp
 ```
-
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for a deeper walkthrough of the module structure.
 
 ## License
 
-[BSD 3-Clause](LICENSE) — Copyright (c) 2025 MBRound18
+[MIT](LICENSE) — Copyright (c) 2025 MBRound18
