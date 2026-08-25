@@ -176,6 +176,21 @@ relaxation must be the narrowest possible and argued at the point of the
 exception — see the `DAC_READ_SEARCH` comment in `executor/docker.rs`, and its
 deliberate absence in `executor/kubernetes.rs`.
 
+## Suppressing a scanner finding on this repository
+
+Sometimes a scanner is right and the finding is still fine — a test fixture
+that really is a private key, for instance. Say why, in `.gitleaks.toml` or an
+inline `gitleaks:allow` comment, and hold it to this standard: **anything
+suppressed must be provably worthless outside the test suite**, or it does not
+belong in the repository at all.
+
+Suppress by **path or content, never by line number**. A `.gitleaksignore`
+fingerprint pins `file:rule:line`, and this repository has already been bitten
+by that: an edit shifted a test token from line 353 to 346, the suppression
+quietly lapsed, and — worse — anything that had moved *into* line 353 would
+have been silently suppressed instead. A suppression that can silently target
+the wrong thing is not a suppression.
+
 ## Style
 
 - `cargo fmt` and `cargo clippy -- -D warnings` both clean.

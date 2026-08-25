@@ -1,0 +1,24 @@
+# gitleaks configuration for this repository.
+#
+# Deliberate test fixtures live here, and they really are a private key and a
+# JWT — the rules flag them correctly. The right answer is to say why they are
+# present, not to weaken the rules.
+#
+# Everything below is matched by *path or content*, never by line number. A
+# `.gitleaksignore` fingerprint pins `file:rule:line`, which silently stops
+# suppressing the moment anything above it moves — and worse, silently starts
+# suppressing whatever moves into that line instead. This repository hit
+# exactly that: an edit shifted a test token from line 353 to 346 and the
+# suppression quietly lapsed.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Test fixtures that are provably worthless outside the test suite"
+paths = [
+  # A 2048-bit RSA key for the test suite's mock identity provider. It signs
+  # tokens that only this project's own tests verify, against an issuer that
+  # exists nowhere else. Committing it keeps those tests hermetic and fast.
+  '''src/http/testdata/.*''',
+]

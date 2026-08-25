@@ -90,6 +90,18 @@ roleRef:
 Note there is no ClusterRole. If you need to scan into other namespaces, add a
 RoleBinding there rather than widening this to cluster scope.
 
+**This Role has been verified against a live cluster**, not just derived from
+reading the code: a ServiceAccount bound to exactly these rules, with a token
+minted for it and nothing else in its kubeconfig, ran a five-scanner scan to
+completion. The same identity is correctly refused `create pods`, `get nodes`,
+`list secrets`, and `create deployments`.
+
+Two things are easy to over-grant and are deliberately absent:
+
+- **No `watch`.** Completion is polled with `get`, so `watch` buys nothing.
+- **No `get`/`list` on secrets.** The server creates and deletes the clone
+  credential Secret; it never needs to read one back, including its own.
+
 ## Credentials
 
 Only if you scan private repositories. On the hosted transport each caller

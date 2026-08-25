@@ -343,7 +343,11 @@ mod tests {
     fn alg_none_is_refused() {
         // The classic: an attacker choosing the algorithm chooses whether
         // verification means anything.
-        let unsigned = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiJ1c2VyLTEifQ.";
+        // gitleaks:allow — an unsigned token whose whole purpose is to be
+        // rejected. The directive travels with the line; a line-numbered
+        // ignore entry does not, and silently stops working the moment
+        // anything above it moves.
+        let unsigned = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiJ1c2VyLTEifQ."; // gitleaks:allow
         let error = server(None)
             .verify(unsigned, &jwks())
             .expect_err("alg:none must never be accepted");
