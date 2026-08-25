@@ -53,6 +53,8 @@ impl fmt::Display for Secret {
 pub enum CredentialSource {
     GitHubApp,
     Token,
+    /// A token borrowed from the `gh` CLI's own login.
+    GhCli,
     SshKey,
     Anonymous,
 }
@@ -62,6 +64,7 @@ impl CredentialSource {
         match self {
             Self::GitHubApp => "github_app",
             Self::Token => "token",
+            Self::GhCli => "gh_cli",
             Self::SshKey => "ssh_key",
             Self::Anonymous => "anonymous",
         }
@@ -120,10 +123,15 @@ pub fn select_source(config: &CredentialConfig, target: &RemoteTarget) -> Creden
         }
         RemoteScheme::Https => {
             // A GitHub App installation only speaks for GitHub.
-            if config.github_app.is_some() && target.host.eq_ignore_ascii_case("github.com") {
+            let is_github = target.host.eq_ignore_ascii_case("github.com");
+            if config.github_app.is_some() && is_github {
                 CredentialSource::GitHubApp
             } else if config.token.is_some() {
                 CredentialSource::Token
+            } else if config.use_gh_cli && is_github && crate::config::gh_cli_token().is_some() {
+                // Last before anonymous: an explicitly configured credential
+                // always wins over one we went looking for.
+                CredentialSource::GhCli
             } else {
                 CredentialSource::Anonymous
             }
@@ -140,6 +148,7 @@ pub fn candidate_sources(target: &RemoteTarget) -> &'static [&'static str] {
         RemoteScheme::Https => &[
             "GITHUB_APP_ID/GITHUB_APP_PRIVATE_KEY/GITHUB_APP_INSTALLATION_ID",
             "GITHUB_TOKEN",
+            "a logged-in `gh` CLI",
         ],
     }
 }
@@ -163,6 +172,14 @@ pub async fn resolve(
                 secret: Secret::new(token),
             })
         }
+        CredentialSource::GhCli => Ok(Credential::HttpToken {
+            source: CredentialSource::GhCli,
+            username: "x-access-token".to_string(),
+            secret: Secret::new(
+                crate::config::gh_cli_token()
+                    .ok_or_else(|| "the gh CLI stopped returning a token".to_string())?,
+            ),
+        }),
         CredentialSource::Token => Ok(Credential::HttpToken {
             source: CredentialSource::Token,
             username: "x-access-token".to_string(),
@@ -283,6 +300,9 @@ mod tests {
 
     fn config(app: bool, token: bool, ssh_key: bool) -> CredentialConfig {
         CredentialConfig {
+            // Off in unit tests: whether this machine has a logged-in `gh` is
+            // not something a precedence test should depend on.
+            use_gh_cli: false,
             github_app: app.then(|| GitHubAppConfig {
                 app_id: "1".to_string(),
                 private_key: "key".to_string(),
@@ -370,6 +390,51 @@ mod tests {
             .expect("token resolves without network");
         assert_eq!(credential.source(), CredentialSource::Token);
         assert_eq!(credential.secret_value(), Some("ghp_token"));
+    }
+
+    #[test]
+    fn the_gh_cli_sits_between_a_configured_token_and_anonymous() {
+        // An explicitly configured credential always wins over one we went
+        // looking for; but going looking beats giving up.
+        let mut config = config(false, false, false);
+        config.use_gh_cli = true;
+
+        let selected = select_source(&config, &https("github.com"));
+        if crate::config::gh_cli_token().is_some() {
+            assert_eq!(selected, CredentialSource::GhCli);
+        } else {
+            assert_eq!(selected, CredentialSource::Anonymous);
+        }
+
+        // A configured token still wins.
+        let mut with_token = config.clone();
+        with_token.token = Some("ghp_token".to_string());
+        assert_eq!(
+            select_source(&with_token, &https("github.com")),
+            CredentialSource::Token
+        );
+    }
+
+    #[test]
+    fn the_gh_cli_token_is_not_offered_to_other_hosts() {
+        // `gh` logs into GitHub; sending its token to another forge would hand
+        // a GitHub credential to an unrelated server.
+        let mut config = config(false, false, false);
+        config.use_gh_cli = true;
+        assert_eq!(
+            select_source(&config, &https("gitlab.example.com")),
+            CredentialSource::Anonymous
+        );
+    }
+
+    #[test]
+    fn the_gh_cli_can_be_turned_off() {
+        let mut config = config(false, false, false);
+        config.use_gh_cli = false;
+        assert_eq!(
+            select_source(&config, &https("github.com")),
+            CredentialSource::Anonymous
+        );
     }
 
     #[test]

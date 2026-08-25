@@ -229,7 +229,7 @@ impl AuditMcpServer {
                     .config
                     .workspace
                     .credentials
-                    .source_names()
+                    .detected_source_names()
                     .into_iter()
                     .map(str::to_string)
                     .collect(),

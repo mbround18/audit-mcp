@@ -42,6 +42,9 @@ fn seeded_config() -> WorkspaceConfig {
             token: Some(SENTINEL.to_string()),
             ssh_private_key: Some(SSH_SENTINEL.to_string()),
             ssh_known_hosts: Some("github.com ssh-ed25519 AAAASENTINEL".to_string()),
+            // The seeded token is the credential under test; borrowing a real
+            // one from `gh` would mean testing the wrong thing.
+            use_gh_cli: false,
         },
         ..Default::default()
     }

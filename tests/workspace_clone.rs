@@ -7,7 +7,7 @@
 //! survives a *successful* scan is a bug someone notices; one that survives a
 //! *failed* scan is a slow disk leak nobody notices until the host fills up.
 
-use audit_mcp::config::WorkspaceConfig;
+use audit_mcp::config::{CredentialConfig, WorkspaceConfig};
 use audit_mcp::redact::Redactor;
 use audit_mcp::workspace::{self, WORKSPACE_PREFIX};
 
@@ -43,6 +43,21 @@ macro_rules! require_clone_environment {
     };
 }
 
+/// A configuration with genuinely no credentials.
+///
+/// The default now borrows a logged-in `gh` CLI's token, so a test about
+/// anonymous access has to say so explicitly rather than assume the machine it
+/// runs on has nothing configured.
+fn without_credentials() -> WorkspaceConfig {
+    WorkspaceConfig {
+        credentials: CredentialConfig {
+            use_gh_cli: false,
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
 fn count_workspaces() -> usize {
     let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
         return 0;
@@ -68,7 +83,7 @@ async fn clones_a_public_repository_with_no_credentials() {
     let root;
 
     {
-        let workspace = workspace::provision(PUBLIC_REPO, &WorkspaceConfig::default(), &redactor)
+        let workspace = workspace::provision(PUBLIC_REPO, &without_credentials(), &redactor)
             .await
             .expect("a public repository clones anonymously");
 
@@ -105,7 +120,7 @@ async fn a_failed_clone_leaves_nothing_behind() {
     let before = count_workspaces();
     let error = workspace::provision(
         "https://github.com/octocat/this-repository-does-not-exist-audit-mcp",
-        &WorkspaceConfig::default(),
+        &without_credentials(),
         &Redactor::new(),
     )
     .await
@@ -199,4 +214,70 @@ async fn a_shallow_clone_is_the_default() {
         .parse()
         .unwrap_or(usize::MAX);
     assert_eq!(commits, 1, "depth 1 by default, so history stays bounded");
+}
+
+/// The `gh` CLI fallback, verified against a repository that actually requires
+/// authentication.
+///
+/// Skips unless `gh` is logged in. The point is not that a token exists but
+/// that it reaches `git` and authenticates a clone that anonymous access
+/// cannot do.
+#[tokio::test]
+#[ignore]
+async fn a_logged_in_gh_cli_authenticates_a_private_clone() {
+    require_clone_environment!();
+    if audit_mcp::config::gh_cli_token().is_none() {
+        eprintln!("skipping: the gh CLI is not logged in");
+        return;
+    }
+
+    // Ask gh for a private repository this account can read. Without one there
+    // is nothing to prove, so skip rather than assert something weaker.
+    let listing = std::process::Command::new("gh")
+        .args([
+            "repo",
+            "list",
+            "--visibility",
+            "private",
+            "--limit",
+            "1",
+            "--json",
+            "nameWithOwner",
+            "--jq",
+            ".[0].nameWithOwner",
+        ])
+        .output()
+        .expect("gh repo list runs");
+    let repo = String::from_utf8_lossy(&listing.stdout).trim().to_string();
+    if repo.is_empty() {
+        eprintln!("skipping: this account has no private repository to test with");
+        return;
+    }
+
+    // Anonymous access must fail, or the test proves nothing.
+    let anonymous = WorkspaceConfig {
+        credentials: audit_mcp::config::CredentialConfig {
+            use_gh_cli: false,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    assert!(
+        workspace::provision(&repo, &anonymous, &Redactor::new())
+            .await
+            .is_err(),
+        "'{repo}' is readable anonymously, so it cannot demonstrate authentication"
+    );
+
+    let workspace = workspace::provision(&repo, &WorkspaceConfig::default(), &Redactor::new())
+        .await
+        .unwrap_or_else(|err| panic!("the gh token should authenticate '{repo}': {err}"));
+
+    assert_eq!(
+        workspace.info().credential_source.as_deref(),
+        Some("gh_cli")
+    );
+    assert!(workspace.root().join(".git").exists());
+    // The borrowed token must not appear in the reported source.
+    assert!(!workspace.info().source.contains("gho_"));
 }

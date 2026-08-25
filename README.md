@@ -129,6 +129,7 @@ Set none of these and public repositories still clone. Credentials are used in t
 | `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_APP_INSTALLATION_ID` | GitHub App installation token, minted fresh per scan. All three or none |
 | `GITHUB_TOKEN` | Token or PAT over HTTPS |
 | `SSH_PRIVATE_KEY` + `SSH_KNOWN_HOSTS` | git over SSH. Host key checking is never silently disabled, so both are required |
+| _(none)_ | If the `gh` CLI is installed and logged in, its token is borrowed for GitHub targets. Set `AUDIT_USE_GH_CLI=false` to opt out |
 
 Bounds, all overridable: shallow clone (`AUDIT_CLONE_DEPTH=1`), 300 s (`AUDIT_CLONE_TIMEOUT_SECS`), 2 GiB (`AUDIT_CLONE_MAX_BYTES`). A target resolving to a private, loopback, or link-local address is refused unless `AUDIT_ALLOW_PRIVATE_ADDRESSES=true`; `AUDIT_ALLOW_REMOTE_TARGETS=false` disables cloning entirely.
 

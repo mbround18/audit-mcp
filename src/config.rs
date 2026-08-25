@@ -100,16 +100,37 @@ impl Default for KubernetesConfig {
 }
 
 /// Credentials available for cloning, in precedence order.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialConfig {
     pub github_app: Option<GitHubAppConfig>,
     pub token: Option<String>,
     pub ssh_private_key: Option<String>,
     pub ssh_known_hosts: Option<String>,
+    /// Whether to fall back to the `gh` CLI's own token when nothing else is
+    /// configured. On by default: a developer already logged into `gh` should
+    /// not have to configure a second credential to scan their own private
+    /// repositories.
+    pub use_gh_cli: bool,
+}
+
+impl Default for CredentialConfig {
+    fn default() -> Self {
+        Self {
+            github_app: None,
+            token: None,
+            ssh_private_key: None,
+            ssh_known_hosts: None,
+            use_gh_cli: true,
+        }
+    }
 }
 
 impl CredentialConfig {
-    /// Names of the configured sources, for reporting. Never the values.
+    /// Names of the *configured* sources, for reporting. Never the values.
+    ///
+    /// Deliberately pure: it does not go looking for a `gh` login, so the
+    /// answer does not depend on the machine the test runs on. Detection is
+    /// [`Self::detected_source_names`], which is for status reporting.
     pub fn source_names(&self) -> Vec<&'static str> {
         let mut names = Vec::new();
         if self.github_app.is_some() {
@@ -123,6 +144,35 @@ impl CredentialConfig {
         }
         names
     }
+
+    /// Configured sources plus any this process can discover — currently a
+    /// logged-in `gh` CLI. Shells out, so it belongs in status reporting
+    /// rather than anywhere a test asserts on configuration.
+    pub fn detected_source_names(&self) -> Vec<&'static str> {
+        let mut names = self.source_names();
+        if self.use_gh_cli && gh_cli_token().is_some() {
+            names.push("gh_cli");
+        }
+        names
+    }
+}
+
+/// Read a token from the `gh` CLI, if it is installed and logged in.
+///
+/// A convenience for local use, not a configured secret: `gh` already holds a
+/// token the developer authorized, and asking them to mint a second one to
+/// scan their own repositories is friction with no security benefit.
+pub fn gh_cli_token() -> Option<String> {
+    let output = std::process::Command::new("gh")
+        .args(["auth", "token"])
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let token = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!token.is_empty()).then_some(token)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -363,6 +413,9 @@ where
     };
 
     workspace.credentials.token = get("GITHUB_TOKEN");
+    if let Some(value) = get("AUDIT_USE_GH_CLI") {
+        workspace.credentials.use_gh_cli = parse_bool("AUDIT_USE_GH_CLI", &value)?;
+    }
     workspace.credentials.ssh_private_key = get("SSH_PRIVATE_KEY");
     workspace.credentials.ssh_known_hosts = get("SSH_KNOWN_HOSTS");
 

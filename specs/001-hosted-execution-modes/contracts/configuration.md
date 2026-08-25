@@ -45,7 +45,7 @@ variable selects between them.
 
 ### Credential sources
 
-Precedence: GitHub App → token → SSH key → anonymous.
+Precedence for HTTPS: GitHub App → `GITHUB_TOKEN` → `gh` CLI → anonymous. For SSH: key → anonymous. An explicitly configured credential always wins over one the server goes looking for.
 
 | Variable | Source |
 |----------|--------|
@@ -53,6 +53,9 @@ Precedence: GitHub App → token → SSH key → anonymous.
 | `GITHUB_TOKEN` | Token / PAT over HTTPS |
 | `SSH_PRIVATE_KEY` | Key for git-over-SSH |
 | `SSH_KNOWN_HOSTS` | Host key verification material. Absent, host key checking is **not** silently disabled; the clone fails with an explanation. |
+| `AUDIT_USE_GH_CLI` | Default `true`. Borrow a token from a logged-in `gh` CLI when nothing else is configured and the target is GitHub. A developer already logged into `gh` should not have to mint a second credential to scan their own repositories. Set `false` to disable. |
+
+The `gh` fallback applies to GitHub only — sending a GitHub token to another forge would hand a credential to an unrelated server — and the response reports `credential_source: "gh_cli"` so it is never ambiguous which credential a scan used.
 
 A partial GitHub App configuration failing loudly is deliberate: silently
 falling through to anonymous would turn a misconfiguration into a confusing
