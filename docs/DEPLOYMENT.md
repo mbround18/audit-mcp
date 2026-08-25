@@ -257,6 +257,15 @@ After it, the namespace should be empty. Jobs are deleted on every path, with
 `ttlSecondsAfterFinished` as a backstop for a controller that dies mid-scan. If
 Jobs are accumulating, that is a bug worth reporting.
 
+## Scans start cold
+
+Each Job repeats whatever install its scanner does at run time; there is no
+persistent cache in the cluster yet, so budget for that on the Rust and Go
+tiers in particular. Findings are unaffected — the two backends are verified to
+produce identical results — but a cluster scan is slower than the same scan
+locally with a warm cache. Tracked as
+[#6](https://github.com/mbround18/audit-mcp/issues/6).
+
 ## Two things that will bite you
 
 **A local path cannot be scanned by a cluster.** The cluster cannot see the

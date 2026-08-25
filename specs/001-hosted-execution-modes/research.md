@@ -299,12 +299,16 @@ source. Leaving one in place would reintroduce the confused deputy by the back
 door, since a scan could fall back to the server's broader access once the
 caller's credential failed.
 
-## Open questions for implementation
+## Deferred to follow-up work
 
-- Persistent scanner caching in the cluster. The Docker backend's named cache
-  volumes have no direct Kubernetes equivalent, so a cluster scan pays a cold
-  cache every time. Correctness first; revisit if install cost measurably
-  dominates a real workload.
+- **Persistent scanner caching in the cluster** — tracked as
+  [#6](https://github.com/mbround18/audit-mcp/issues/6). The Docker backend's
+  named cache volumes have no direct Kubernetes equivalent, so a cluster scan
+  pays a cold cache every time. A cost problem, not a correctness one: parity
+  tests already show identical findings across backends. Measure before
+  building anything.
+
+No open questions remain for this feature.
 
 **Closed by the 2026-08-25 clarification session**: the first identity provider
 (R3), caller authorization (R10), the workspace sharing model (R11), and the

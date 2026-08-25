@@ -142,3 +142,15 @@ docker run --rm \
   busybox \
   tar xzf /out/audit-cargo-home.tar.gz -C /data
 ```
+
+## The Kubernetes backend has no cache yet
+
+Everything above describes the Docker backend. A scan run as Kubernetes Jobs
+starts cold every time: named volumes have no direct cluster equivalent, so
+each Job repeats whatever install its scanner does at run time. The Rust and Go
+tiers feel this most, since `cargo install` and `go run <tool>@latest` compile
+before they scan.
+
+This is a cost, not a correctness problem — `tests/executor_parity.rs` shows the
+two backends produce identical findings either way. Tracked as
+[#6](https://github.com/mbround18/audit-mcp/issues/6).
