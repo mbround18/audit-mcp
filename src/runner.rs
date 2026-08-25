@@ -14,7 +14,9 @@ use std::{env, path::PathBuf, sync::Arc, time::Duration};
 
 use uuid::Uuid;
 
-use crate::executor::{ExecutionRequest, Executor, Termination, docker::DockerExecutor};
+use crate::executor::{
+    ExecutionRequest, Executor, Termination, WorkspaceSource, docker::DockerExecutor,
+};
 use crate::models::{RunStatus, ScanExecution, ScannerDefinition, ScannerRunResult};
 use crate::parsers::{self, ParseContext};
 use crate::redact::Redactor;
@@ -24,7 +26,7 @@ use crate::scanners::DEFAULT_TIMEOUT_SECS;
 const LOG_EXCERPT_CHARS: usize = 24_000;
 
 /// Per-run knobs supplied by the caller.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ScanOptions {
     /// Wall-clock ceiling; overrides the scanner's own default when set.
     pub timeout: Option<Duration>,
@@ -33,6 +35,19 @@ pub struct ScanOptions {
     /// Secrets to strip from anything that becomes a response field. Scoped to
     /// one scan, so clearing it cannot unregister another scan's credential.
     pub redactor: Redactor,
+    /// Where the workspace came from, for backends that cannot see this host.
+    pub source: WorkspaceSource,
+}
+
+impl Default for ScanOptions {
+    fn default() -> Self {
+        Self {
+            timeout: None,
+            include_raw_logs: false,
+            redactor: Redactor::new(),
+            source: WorkspaceSource::LocalPath,
+        }
+    }
 }
 
 /// Runs scanners through an execution backend and normalizes what comes back.
@@ -114,6 +129,7 @@ impl ScanRunner {
             .execute(ExecutionRequest {
                 scanner,
                 workspace: mount.host_dir,
+                source: options.source.clone(),
                 command: command.clone(),
                 environment,
                 timeout,

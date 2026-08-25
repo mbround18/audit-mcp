@@ -33,6 +33,12 @@ pub const WORKSPACE_PREFIX: &str = "audit-workspace-";
 pub struct Workspace {
     root: PathBuf,
     info: WorkspaceInfo,
+    /// Set when the tree came from a repository, so a remote backend can clone
+    /// it for itself rather than being handed a path it cannot see.
+    remote: Option<target::RemoteTarget>,
+    /// Kept for the same reason: a remote backend must authenticate its own
+    /// fetch. Never serialized.
+    credential: Option<Credential>,
     /// Present only for a provisioned clone. Dropping it removes the tree.
     staging: Option<TempDir>,
     /// Secrets registered for this scan, cleared when the workspace goes.
@@ -51,6 +57,8 @@ impl Workspace {
                 credential_source: None,
             },
             root: path,
+            remote: None,
+            credential: None,
             staging: None,
             redactor: Redactor::new(),
         }
@@ -72,6 +80,34 @@ impl Workspace {
 
     pub fn is_owned(&self) -> bool {
         self.staging.is_some()
+    }
+
+    /// How a backend that cannot see this host should obtain the tree.
+    ///
+    /// Carries the credential, because a remote environment has to fetch the
+    /// repository itself and cannot borrow the clone this process already made.
+    pub fn source(&self) -> crate::executor::WorkspaceSource {
+        match &self.remote {
+            Some(remote) => crate::executor::WorkspaceSource::Repository {
+                url: remote.url.clone(),
+                reference: remote.reference.clone(),
+                credential: self.credential.as_ref().and_then(|credential| {
+                    match credential {
+                        Credential::HttpToken {
+                            username, secret, ..
+                        } => Some(crate::executor::CloneCredential {
+                            username: username.clone(),
+                            secret: secret.expose().to_string(),
+                        }),
+                        // An SSH key needs its own delivery and host key
+                        // material; the backend says so rather than silently
+                        // cloning anonymously and reporting "clean".
+                        _ => None,
+                    }
+                }),
+            },
+            None => crate::executor::WorkspaceSource::LocalPath,
+        }
     }
 }
 
@@ -142,6 +178,8 @@ pub async fn provision(
                     credential_source: Some(credential.source().as_str().to_string()),
                 },
                 root,
+                remote: Some(remote.clone()),
+                credential: Some(credential),
                 staging: Some(staging),
                 redactor: redactor.clone(),
             })
@@ -314,6 +352,8 @@ mod tests {
                 credential_source: Some("anonymous".to_string()),
             },
             root,
+            remote: None,
+            credential: None,
             staging: Some(staging),
             redactor: Redactor::new(),
         });
@@ -347,6 +387,8 @@ mod tests {
                     credential_source: Some("token".to_string()),
                 },
                 root,
+                remote: None,
+                credential: None,
                 staging: Some(staging),
                 redactor: redactor.clone(),
             };

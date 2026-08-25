@@ -137,26 +137,26 @@ assert an identical normalized finding.
 
 ### Tests for User Story 2 ⚠️
 
-- [ ] T043 [P] [US2] Write `tests/executor_parity.rs` (`#[ignore]`, self-skipping without a cluster): run the same scanner and fixture through both backends and assert equivalent normalized findings — same rule IDs, severities, and repository-relative paths (SC-003)
+- [X] T043 [P] [US2] Write `tests/executor_parity.rs` (`#[ignore]`, self-skipping without a cluster): run the same scanner and fixture through both backends and assert equivalent normalized findings — same rule IDs, severities, and repository-relative paths (SC-003)
 - [ ] T044 [P] [US2] Add a cluster tier to `tests/scanner_smoke.rs` that runs the structured scanners through the Kubernetes backend and applies the same "did not come back as tool_error, timeout, or unparsed" contract
-- [ ] T045 [P] [US2] Add a preflight test in `tests/executor_parity.rs` asserting that with no reachable cluster a scan returns exactly one error, not one per selected scanner (FR-016)
+- [X] T045 [P] [US2] Add a preflight test in `tests/executor_parity.rs` asserting that with no reachable cluster a scan returns exactly one error, not one per selected scanner (FR-016)
 
 ### Implementation for User Story 2
 
-- [ ] T046 [US2] Confirm the `kube` API surface assumed in research.md R4 (`Api::<Job>::namespaced`, completion watching, log retrieval) before building on it — research.md flags this as unverified
-- [ ] T047 [US2] Implement lazy cluster connection in `src/executor/kubernetes.rs` using in-cluster ServiceAccount with kubeconfig fallback, not caching failures, mirroring the Docker client's behaviour (constitution V)
-- [ ] T048 [US2] Extend the single-preflight check in `src/server.rs` to ask the active executor for reachability, so an unreachable cluster yields one error naming the backend rather than one failure per selected scanner (FR-016)
-- [ ] T049 [US2] Build the Job spec in `src/executor/kubernetes.rs`: one `batch/v1` Job per scanner run, with `backoffLimit` and `ttlSecondsAfterFinished` as a cleanup backstop
-- [ ] T050 [US2] Add the git-clone initContainer and `emptyDir` in `src/executor/kubernetes.rs`, mounted **read-only** by the scanner container — no host path, no Docker socket (FR-012). Pin the clone image to an exact tag, never `:latest`: an unpinned reference that drifts or 404s is the same failure class as the unpinned detekt download that once delivered an HTML error page as a jar
-- [ ] T051 [US2] Apply the isolation guarantees in `src/executor/kubernetes.rs`: read-only mount, no privilege escalation, **all** capabilities dropped, memory limit, and wall-clock timeout (FR-013). Do not carry over the Docker path's `DAC_READ_SEARCH` grant — it exists to read host directories a bind mount exposes with foreign ownership, and an `emptyDir` written by our own initContainer has uniform ownership we control, so the grant would buy nothing (constitution III). If T053 turns up a concrete case, add it deliberately with a recorded reason
-- [ ] T052 [US2] Apply operator settings in `src/executor/kubernetes.rs` verbatim: namespace, service account, resource requests/limits, node selector, tolerations, image pull secrets (FR-014)
-- [ ] T053 [US2] Implement log collection in `src/executor/kubernetes.rs` — and **check whether pod logs interleave stdout and stderr** the way Docker's do. Interleaving corrupted gosec's SARIF in the Docker path; if the cluster merges them, affected scanners need their stderr redirected in the command instead (research.md open question)
-- [ ] T054 [US2] Implement timeout handling in `src/executor/kubernetes.rs`: delete the Job, collect partial logs first so work done is still visible, and return `Termination::TimedOut`
-- [ ] T055 [US2] Map infrastructure failures in `src/executor/kubernetes.rs` — eviction, OOM kill, unschedulable, image pull failure — to `Termination::Infrastructure(reason)` carrying the cluster's own words, so they surface as `tool_error` and never as `clean` (FR-018)
-- [ ] T056 [US2] Implement Job deletion on every exit path plus reaping of Jobs orphaned by a controller restart, in `src/executor/kubernetes.rs` (FR-015)
-- [ ] T057 [US2] Deliver credentials to the clone initContainer from a Kubernetes Secret in `src/executor/kubernetes.rs`, never as Job spec environment variables — a Job spec is readable by anyone with `get jobs` in the namespace (FR-029, R7)
-- [ ] T058 [US2] Report the backend in `ScanExecution` in `src/models.rs` and select it from configuration in `src/server.rs`
-- [ ] T059 [US2] Accept a cold scanner cache in the cluster for this release, documenting the limitation in `docs/CACHE.md` and recording the persistent-cache question as follow-up in `specs/001-hosted-execution-modes/research.md` — correctness before cache optimisation (R9)
+- [X] T046 [US2] Confirm the `kube` API surface assumed in research.md R4 (`Api::<Job>::namespaced`, completion watching, log retrieval) before building on it — research.md flags this as unverified
+- [X] T047 [US2] Implement lazy cluster connection in `src/executor/kubernetes.rs` using in-cluster ServiceAccount with kubeconfig fallback, not caching failures, mirroring the Docker client's behaviour (constitution V)
+- [X] T048 [US2] Extend the single-preflight check in `src/server.rs` to ask the active executor for reachability, so an unreachable cluster yields one error naming the backend rather than one failure per selected scanner (FR-016)
+- [X] T049 [US2] Build the Job spec in `src/executor/kubernetes.rs`: one `batch/v1` Job per scanner run, with `backoffLimit` and `ttlSecondsAfterFinished` as a cleanup backstop
+- [X] T050 [US2] Add the git-clone initContainer and `emptyDir` in `src/executor/kubernetes.rs`, mounted **read-only** by the scanner container — no host path, no Docker socket (FR-012). Pin the clone image to an exact tag, never `:latest`: an unpinned reference that drifts or 404s is the same failure class as the unpinned detekt download that once delivered an HTML error page as a jar
+- [X] T051 [US2] Apply the isolation guarantees in `src/executor/kubernetes.rs`: read-only mount, no privilege escalation, **all** capabilities dropped, memory limit, and wall-clock timeout (FR-013). Do not carry over the Docker path's `DAC_READ_SEARCH` grant — it exists to read host directories a bind mount exposes with foreign ownership, and an `emptyDir` written by our own initContainer has uniform ownership we control, so the grant would buy nothing (constitution III). If T053 turns up a concrete case, add it deliberately with a recorded reason
+- [X] T052 [US2] Apply operator settings in `src/executor/kubernetes.rs` verbatim: namespace, service account, resource requests/limits, node selector, tolerations, image pull secrets (FR-014)
+- [X] T053 [US2] Implement log collection in `src/executor/kubernetes.rs` — and **check whether pod logs interleave stdout and stderr** the way Docker's do. Interleaving corrupted gosec's SARIF in the Docker path; if the cluster merges them, affected scanners need their stderr redirected in the command instead (research.md open question)
+- [X] T054 [US2] Implement timeout handling in `src/executor/kubernetes.rs`: delete the Job, collect partial logs first so work done is still visible, and return `Termination::TimedOut`
+- [X] T055 [US2] Map infrastructure failures in `src/executor/kubernetes.rs` — eviction, OOM kill, unschedulable, image pull failure — to `Termination::Infrastructure(reason)` carrying the cluster's own words, so they surface as `tool_error` and never as `clean` (FR-018)
+- [X] T056 [US2] Implement Job deletion on every exit path plus reaping of Jobs orphaned by a controller restart, in `src/executor/kubernetes.rs` (FR-015)
+- [X] T057 [US2] Deliver credentials to the clone initContainer from a Kubernetes Secret in `src/executor/kubernetes.rs`, never as Job spec environment variables — a Job spec is readable by anyone with `get jobs` in the namespace (FR-029, R7)
+- [X] T058 [US2] Report the backend in `ScanExecution` in `src/models.rs` and select it from configuration in `src/server.rs`
+- [X] T059 [US2] Accept a cold scanner cache in the cluster for this release, documenting the limitation in `docs/CACHE.md` and recording the persistent-cache question as follow-up in `specs/001-hosted-execution-modes/research.md` — correctness before cache optimisation (R9)
 
 **Checkpoint**: US1 and US2 both work independently. `audit-mcp` can now run in
 a cluster with no Docker socket.

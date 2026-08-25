@@ -12,6 +12,8 @@
 //! backend.
 
 pub mod docker;
+#[cfg(feature = "kubernetes")]
+pub mod kubernetes;
 
 use std::{fmt::Debug, path::PathBuf, time::Duration};
 
@@ -22,12 +24,56 @@ use crate::models::ScannerDefinition;
 /// Where the workspace is mounted inside every execution environment.
 pub const WORKSPACE_MOUNT: &str = "/workspace";
 
+/// How a backend that cannot see the host filesystem obtains the workspace.
+///
+/// A local directory is reachable by a local container and unreachable by a
+/// remote cluster, so a backend that runs elsewhere needs somewhere to clone
+/// from rather than a path to mount.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkspaceSource {
+    /// A directory on this host.
+    LocalPath,
+    /// A repository the execution environment can clone for itself.
+    Repository {
+        url: String,
+        reference: Option<String>,
+        /// Credential the environment needs to fetch it, when it is private.
+        credential: Option<CloneCredential>,
+    },
+}
+
+/// An HTTP credential a remote execution environment needs to clone with.
+///
+/// Only the HTTP form travels: an SSH key would need its own delivery and host
+/// key material, and the backend refuses that case explicitly rather than
+/// half-supporting it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct CloneCredential {
+    pub username: String,
+    pub secret: String,
+}
+
+// Never derive this. The whole point is that a request carrying a credential
+// can be logged without leaking it.
+impl Debug for CloneCredential {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CloneCredential")
+            .field("username", &self.username)
+            .field("secret", &"[redacted]")
+            .finish()
+    }
+}
+
 /// Everything a backend needs to run one scanner once.
 #[derive(Debug, Clone)]
 pub struct ExecutionRequest<'a> {
     pub scanner: &'a ScannerDefinition,
-    /// Directory to expose read-only at [`WORKSPACE_MOUNT`].
+    /// Directory to expose read-only at [`WORKSPACE_MOUNT`]. Meaningful only
+    /// to a backend running on this host.
     pub workspace: PathBuf,
+    /// Where the workspace comes from, for backends that must fetch it.
+    pub source: WorkspaceSource,
     /// Fully resolved argv, with `{target}` already substituted and any
     /// install script already spliced in.
     pub command: Vec<String>,

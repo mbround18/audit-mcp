@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 
 use crate::{
-    config::Config,
+    config::{Config, ExecutorKind},
     explain::FindingExplainer,
     fixes::FixEngine,
     models::{
@@ -123,17 +123,42 @@ impl AuditMcpServer {
     /// Construction never touches Docker, so the MCP server starts (and can
     /// answer catalog/explain calls) on a host with no daemon running.
     pub fn new() -> anyhow::Result<Self> {
+        let config =
+            Config::from_env().map_err(|err| anyhow::anyhow!("invalid configuration: {err}"))?;
+
+        // Clean up after a previous process that was killed rather than shut
+        // down. `TempDir` removes a workspace on drop, and a killed process
+        // drops nothing, so without this a crash loop fills the disk.
+        let reaped = crate::workspace::reap_orphans(std::time::Duration::from_secs(3600));
+        if reaped > 0 {
+            eprintln!("{{\"level\":\"info\",\"event\":\"workspaces_reaped\",\"count\":{reaped}}}");
+        }
+
+        let runner = match config.executor {
+            ExecutorKind::Docker => ScanRunner::docker(),
+            #[cfg(feature = "kubernetes")]
+            ExecutorKind::Kubernetes => ScanRunner::with_executor(Arc::new(
+                crate::executor::kubernetes::KubernetesExecutor::new(config.kubernetes.clone()),
+            )),
+            // Unreachable: configuration validation already rejects a backend
+            // whose feature is not compiled in, naming the feature to rebuild
+            // with rather than saying "unknown backend".
+            #[cfg(not(feature = "kubernetes"))]
+            ExecutorKind::Kubernetes => {
+                return Err(anyhow::anyhow!(
+                    "AUDIT_EXECUTOR=kubernetes requires a build with --features kubernetes"
+                ));
+            }
+        };
+
         Ok(Self {
             tool_router: Self::tool_router(),
             registry: Arc::new(ScannerRegistry::new()?),
-            runner: ScanRunner::docker(),
+            runner,
             explainer: Arc::new(FindingExplainer::new()),
             fixer: Arc::new(FixEngine::new()),
             selector: Arc::new(ToolSelector::new()),
-            config: Arc::new(
-                Config::from_env()
-                    .map_err(|err| anyhow::anyhow!("invalid configuration: {err}"))?,
-            ),
+            config: Arc::new(config),
         })
     }
 }
@@ -269,6 +294,7 @@ impl AuditMcpServer {
             timeout: request.timeout_secs.map(Duration::from_secs),
             include_raw_logs: request.include_raw_logs.unwrap_or(false),
             redactor,
+            source: workspace.source(),
         };
         let permits = Arc::new(Semaphore::new(
             request
