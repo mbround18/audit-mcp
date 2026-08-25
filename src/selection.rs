@@ -307,10 +307,7 @@ impl ToolSelector {
                         "checkstyle".to_string(),
                         "snyk-java".to_string(),
                         "google-java-format".to_string(),
-                        "palantir-java-format".to_string(),
                         "dependency-check".to_string(),
-                        "error-prone".to_string(),
-                        "jdk-flight-recorder".to_string(),
                     ],
                     categories: vec![
                         "Code Quality".to_string(),
@@ -888,10 +885,7 @@ mod tests {
             "checkstyle",
             "snyk-java",
             "google-java-format",
-            "palantir-java-format",
             "dependency-check",
-            "error-prone",
-            "jdk-flight-recorder",
         ] {
             assert!(
                 plan.selected_scanners.contains(&(*name).to_string()),

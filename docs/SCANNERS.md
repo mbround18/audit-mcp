@@ -8,19 +8,29 @@ A scanner is **normalized** when `audit-mcp` parses its output into structured f
 
 Normalized via the generic **SARIF** parser:
 
-`semgrep`, `gitleaks`, `hadolint`, `ruff`, `tfsec`, `terrascan`, `bearer`, `gosec`, `govulncheck`, `golangci-lint`, `snyk`, `snyk-java`, `dotnet-snyk`, `jb-inspectcode`, `pmd`, `checkstyle`, `dependency-check`, `psalm`, `flawfinder`, `detekt`, `ktlint`
+`semgrep`, `gitleaks`, `hadolint`, `ruff`, `tfsec`, `terrascan`, `bearer`, `gosec`, `govulncheck`, `golangci-lint`, `snyk`, `snyk-java`, `dotnet-snyk`, `jb-inspectcode`, `spotbugs`, `pmd`, `checkstyle`, `dependency-check`, `psalm`, `flawfinder`, `detekt`, `ktlint`
 
 Normalized via a **tool-native JSON** parser:
 
-`bandit`, `pip-audit`, `eslint`, `npm-audit`, `shellcheck`, `cargo-clippy`, `cargo-audit`, `staticcheck`, `rubocop`, `phpstan`, `grype`, `osv-scanner`, `checkov`, `trivy-config`, `kube-linter`
+`bandit`, `pip-audit`, `eslint`, `npm-audit`, `shellcheck`, `cargo-clippy`, `cargo-audit`, `staticcheck`, `rubocop`, `standardrb`, `phpstan`, `phpcs`, `credo`, `dotnet-format`, `roslyn-analyzers`, `grype`, `osv-scanner`, `checkov`, `trivy-config`, `kube-linter`
 
 Everything else runs and returns raw logs. Adding a parser is the most valuable contribution you can make — see [ARCHITECTURE.md](ARCHITECTURE.md).
+
+## Silent-when-clean tools
+
+Some tools print nothing at all when they find nothing, which is
+indistinguishable from a crash. Where a flag exists, the catalog avoids it —
+`gosec` runs without `-quiet`, which otherwise suppresses its whole report on a
+clean run. Where no flag exists (`staticcheck`), the parser encodes that
+silence means "clean" for that specific tool.
 
 ## Exit codes
 
 Each scanner declares the exit codes that mean "ran correctly". Most linters exit `1` simply because they found something, which is not a failure. An exit code outside the declared set is reported as `tool_error` with the logs attached — unless the scanner nonetheless produced parseable findings, in which case the results are trusted.
 
 No scanner wraps its command in `|| true`: that would make a crash indistinguishable from a clean run, which is the failure mode this design exists to prevent.
+
+Scanners that fan a tool out over `find … | xargs` must also accept exit **123**: `xargs` reports 123 whenever a command it spawned exited non-zero, so a linter's "I found something" exit reaches us as 123. A unit test enforces this for every xargs-based entry.
 
 ## Read-only workspace
 
@@ -183,6 +193,10 @@ Cache volumes: `audit-gradle-home` (Gradle user home / caches).
 
 Base image: `elixir:1.18-slim`
 
+Two things the base image cannot do unaided, both handled by the install script: `elixir:*-slim` ships no CA certificates, so every hex fetch fails with `:no_cacerts_found`; and `mix archive.install` does not resolve dependencies, so credo must be given `bunt`, `jason`, and `file_system` explicitly or it crashes on its first line of output.
+
+`sobelow` targets Phoenix applications and warns that it cannot find a router on a plain Elixir project.
+
 | Scanner   | Category        | Description                                                          |
 | --------- | --------------- | -------------------------------------------------------------------- |
 | `credo`   | Code Quality    | Static code analysis for Elixir with consistency and quality checks  |
@@ -200,25 +214,32 @@ Base image: `ghcr.io/astral-sh/uv:python3.12-bookworm-slim`
 
 ## Java
 
-Base image: `ghcr.io/jbangdev/jbang-action:latest`
+Base image: `eclipse-temurin:21` (plus `ghcr.io/jbangdev/jbang-action:latest` for `dependency-check`)
 
-| Scanner                | Category           | Description                                         |
-| ---------------------- | ------------------ | --------------------------------------------------- |
-| `spotbugs`             | Code Quality       | Bytecode analysis for logic defects                 |
-| `pmd`                  | Code Analysis      | Detects suboptimal patterns and complex structures  |
-| `checkstyle`           | Formatting         | Validates code style against Google Java Style      |
-| `snyk-java`            | Security (SCA)     | Scans Maven/Gradle dependencies for vulnerabilities |
-| `google-java-format`   | Formatting         | Formats Java sources to Google Java Style           |
-| `palantir-java-format` | Formatting         | Alternative deterministic Java formatter            |
-| `dependency-check`     | Security (SCA)     | OWASP dependency CVE scanner                        |
-| `error-prone`          | Compilation Safety | Compiler plugin checks for common Java mistakes     |
-| `jdk-flight-recorder`  | Performance        | JFR-based runtime behavior capture                  |
+| Scanner              | Category       | Description                                                        |
+| -------------------- | -------------- | ------------------------------------------------------------------ |
+| `spotbugs`           | Code Quality   | Bytecode analysis for logic defects — needs compiled classes       |
+| `pmd`                | Code Analysis  | Detects suboptimal patterns and complex structures (SARIF)         |
+| `checkstyle`         | Formatting     | Validates code style against Google Java Style (SARIF)             |
+| `snyk-java`          | Security (SCA) | Scans Maven/Gradle dependencies for vulnerabilities (SARIF)        |
+| `google-java-format` | Formatting     | Checks Java sources against Google Java Style; never rewrites files |
+| `dependency-check`   | Security (SCA) | OWASP dependency CVE scanner — set `NVD_API_KEY` to avoid throttling |
 
-Cache volumes: `audit-jbang-cache` (jbang downloads), `audit-maven-repo` (Maven local repository).
+Java tools are downloaded from their own **pinned** releases at container start, the same pattern used for detekt and ktlint. Pinning matters: these are fetched by exact asset name, and an unpinned URL that 404s downloads an HTML error page that then masquerades as a broken jar.
+
+`spotbugs` reads bytecode rather than source, so it only reports on a project that has already been compiled; on a source-only checkout it finds no classes and returns `unparsed`.
+
+Cache volumes: `audit-gradle-home`; `audit-jbang-cache` and `audit-maven-repo` for `dependency-check`.
+
+> **Removed in 0.2.0.** `palantir-java-format`, `error-prone`, and `jdk-flight-recorder` were dropped. All three were invoked through jbang catalog aliases that do not exist, and none could function as a repository scanner: `error-prone` is a compiler plugin and `jdk-flight-recorder` records a running program rather than analysing code. `google-java-format` covers Java formatting.
 
 ## Ruby
 
-Base image: `ruby:3.3-slim`
+Base image: `ruby:3.3`
+
+Deliberately **not** the `-slim` variant: it ships no compiler or `make`, so every gem with a native extension (`prism`, `racc` — pulled in by rubocop and brakeman) fails to build and every Ruby scanner dies during install.
+
+`brakeman` requires a Rails application layout and errors on a plain Ruby project.
 
 | Scanner          | Category        | Description                                     |
 | ---------------- | --------------- | ----------------------------------------------- |
@@ -238,6 +259,8 @@ Cache volumes: `audit-gem-home` (installed gems shared across all Ruby scanners)
 
 Base image: `composer:2`
 
+The image ships no analyzers, so each PHP scanner installs its own tool into the shared composer home volume first.
+
 | Scanner    | Category        | Description                                       |
 | ---------- | --------------- | ------------------------------------------------- |
 | `phpstan`  | Code Quality    | Advanced static analysis for PHP                  |
@@ -251,6 +274,10 @@ Cache volumes: `audit-composer-cache` (download cache), `audit-composer-home` (g
 ## .NET
 
 Base image: `mcr.microsoft.com/dotnet/sdk:8.0`
+
+.NET scanners copy the workspace to a container-local path before running. The SDK insists on writing `obj/` next to the project before it can even load a workspace, which the read-only mount forbids. The copy keeps the host source untouched while giving the toolchain the writable tree it requires; finding paths are mapped back to repository-relative form.
+
+`dotnet-format` and `roslyn-analyzers` both emit standard MSBuild diagnostic lines, which are normalized by a shared parser.
 
 | Scanner               | Category       | Description                                  |
 | --------------------- | -------------- | -------------------------------------------- |

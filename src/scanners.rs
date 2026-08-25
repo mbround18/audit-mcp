@@ -81,8 +81,33 @@ const UV_IMAGE: &str = "ghcr.io/astral-sh/uv:python3.12-bookworm-slim";
 const NODE_IMAGE: &str = "node:20-alpine";
 const RUST_IMAGE: &str = "rust:latest";
 const GO_IMAGE: &str = "golang:1.25-bookworm";
-const JAVA_IMAGE: &str = "ghcr.io/jbangdev/jbang-action:latest";
-const RUBY_IMAGE: &str = "ruby:3.3-slim";
+// A plain JDK. The previous jbang-action image was driven with `tool@catalog`
+// aliases (`pmd@pmd`, `checkstyle@checkstyle`, …) that do not exist in any
+// jbang catalog, so every Java scanner failed with "Unknown catalog". Tools
+// are now downloaded from their own pinned releases, the same pattern that
+// already works for detekt and ktlint.
+const JAVA_IMAGE: &str = "eclipse-temurin:21";
+
+/// Pinned Java tool versions. Pinned rather than "latest" because these are
+/// fetched by exact asset name, and a release rename would otherwise download
+/// an HTML error page and masquerade as a broken jar.
+const PMD_VERSION: &str = "7.7.0";
+const CHECKSTYLE_VERSION: &str = "10.21.0";
+const GOOGLE_JAVA_FORMAT_VERSION: &str = "1.25.2";
+const SPOTBUGS_VERSION: &str = "4.10.4";
+
+/// google-java-format reaches into javac internals, which JDK 16+ hides.
+const GJF_EXPORTS: &str = concat!(
+    "--add-exports jdk.compiler/com.sun.tools.javac.api=ALL-UNNAMED ",
+    "--add-exports jdk.compiler/com.sun.tools.javac.file=ALL-UNNAMED ",
+    "--add-exports jdk.compiler/com.sun.tools.javac.parser=ALL-UNNAMED ",
+    "--add-exports jdk.compiler/com.sun.tools.javac.tree=ALL-UNNAMED ",
+    "--add-exports jdk.compiler/com.sun.tools.javac.util=ALL-UNNAMED"
+);
+// NOT the -slim variant: it ships no compiler or make, so every gem with a
+// native extension (prism, racc — pulled in by rubocop and brakeman) fails to
+// build, and every Ruby scanner dies during install.
+const RUBY_IMAGE: &str = "ruby:3.3";
 const PHP_IMAGE: &str = "composer:2";
 const DOTNET_IMAGE: &str = "mcr.microsoft.com/dotnet/sdk:8.0";
 const CPP_IMAGE: &str = "ubuntu:24.04";
@@ -140,6 +165,18 @@ fn security(
 ) -> Builder {
     Builder::new(name, description, category, "security", image, command)
 }
+
+/// The .NET SDK insists on writing `obj/` next to the project before it can
+/// even load a workspace, which the read-only mount forbids. Copying the tree
+/// to a container-local path keeps the host source untouched while giving the
+/// toolchain the writable directory it requires. Findings' paths are mapped
+/// back by `parsers::normalize_workspace_path`.
+const DOTNET_WORKDIR: &str = "mkdir -p /tmp/src && cp -r {target}/. /tmp/src/ && cd /tmp/src &&";
+
+/// `xargs` reports 123 when any command it spawned exited non-zero, so every
+/// scanner that fans a tool out over `find | xargs` sees 123 instead of the
+/// tool's own "I found something" exit code.
+const XARGS_FOUND: i64 = 123;
 
 /// Prefix for apt-based installs inside a scanner container.
 ///
@@ -505,7 +542,7 @@ impl ScannerRegistry {
                 ],
             )
             .sarif()
-            .exits(&[0, 1])
+            .exits(&[0, 1, XARGS_FOUND])
             .build(),
             iac(
                 "kubesec",
@@ -518,7 +555,7 @@ impl ScannerRegistry {
                     "find . \\( -name '*.yaml' -o -name '*.yml' \\) -print0 | xargs -0 -r kubesec scan",
                 ],
             )
-            .exits(&[0, 2])
+            .exits(&[0, 2, XARGS_FOUND])
             .build(),
             iac(
                 "conftest",
@@ -554,7 +591,7 @@ impl ScannerRegistry {
                 ],
             )
             .json()
-            .exits(&[0, 1])
+            .exits(&[0, 1, XARGS_FOUND])
             .build(),
             // -------------------------------------------------------- rust ---
             rust(
@@ -694,7 +731,9 @@ impl ScannerRegistry {
                 &[
                     "sh",
                     "-c",
-                    "go run github.com/securego/gosec/v2/cmd/gosec@latest -fmt sarif -out /dev/stdout -quiet ./...",
+                    // No -quiet: it suppresses the report entirely when there are
+                    // no findings, which is indistinguishable from a crash.
+                    "go run github.com/securego/gosec/v2/cmd/gosec@latest -fmt sarif -out /dev/stdout ./...",
                 ],
             )
             .sarif()
@@ -809,11 +848,21 @@ impl ScannerRegistry {
             // -------------------------------------------------------- java ---
             java(
                 "spotbugs",
-                "Bytecode analysis for deep Java logic defects.",
+                "Bytecode analysis for deep Java logic defects. Needs compiled classes; run a build first.",
                 "Code Quality",
-                &["sh", "-c", "jbang spotbugs@spotbugs {target}"],
+                &[
+                    "sh",
+                    "-c",
+                    // SpotBugs reads bytecode, not source, so point it at whatever
+                    // compiled output the project already has.
+                    "find {target} -type d \\( -name classes -o -name 'target/classes' -o -name build/classes \\) -print0 | xargs -0 -r /opt/spotbugs/bin/spotbugs -textui -sarif -low",
+                ],
             )
-            .exits(&[0, 1])
+            .install(&format!(
+                "curl -sSLf https://github.com/spotbugs/spotbugs/releases/download/{SPOTBUGS_VERSION}/spotbugs-{SPOTBUGS_VERSION}.tgz -o /tmp/spotbugs.tgz && mkdir -p /opt/spotbugs && tar -xzf /tmp/spotbugs.tgz -C /opt/spotbugs --strip-components=1"
+            ))
+            .sarif()
+            .exits(&[0, 1, XARGS_FOUND])
             .build(),
             java(
                 "pmd",
@@ -822,22 +871,33 @@ impl ScannerRegistry {
                 &[
                     "sh",
                     "-c",
-                    "jbang pmd@pmd check -d {target} -R rulesets/java/quickstart.xml -f sarif",
+                    &format!(
+                        "/opt/pmd-bin-{PMD_VERSION}/bin/pmd check -d {{target}} -R rulesets/java/quickstart.xml -f sarif --no-progress"
+                    ),
                 ],
             )
+            .install(&format!(
+                "{APT} unzip >/dev/null && curl -sSLf https://github.com/pmd/pmd/releases/download/pmd_releases%2F{PMD_VERSION}/pmd-dist-{PMD_VERSION}-bin.zip -o /tmp/pmd.zip && unzip -q /tmp/pmd.zip -d /opt"
+            ))
             .sarif()
+            // 4 = violations found.
             .exits(&[0, 4])
             .build(),
             java(
                 "checkstyle",
-                "Validates Java code style conventions.",
+                "Validates Java code style conventions against Google Java Style.",
                 "Code Formatting",
                 &[
                     "sh",
                     "-c",
-                    "jbang checkstyle@checkstyle -c /google_checks.xml -f sarif {target}",
+                    // A leading slash makes checkstyle resolve the config from
+                    // its own classpath rather than the read-only workspace.
+                    "java -jar /opt/checkstyle.jar -c /google_checks.xml -f sarif {target}",
                 ],
             )
+            .install(&format!(
+                "curl -sSLf https://github.com/checkstyle/checkstyle/releases/download/checkstyle-{CHECKSTYLE_VERSION}/checkstyle-{CHECKSTYLE_VERSION}-all.jar -o /opt/checkstyle.jar"
+            ))
             .sarif()
             .exits(&[0, 1])
             .build(),
@@ -845,7 +905,10 @@ impl ScannerRegistry {
                 "snyk-java",
                 "Scans Java dependencies for known vulnerabilities.",
                 "Security (SCA)",
-                &["sh", "-c", "jbang snyk@snyk test --sarif"],
+                &["sh", "-c", "/usr/local/bin/snyk test --sarif"],
+            )
+            .install(
+                "curl -sSLf https://static.snyk.io/cli/latest/snyk-linux -o /usr/local/bin/snyk && chmod +x /usr/local/bin/snyk",
             )
             .sarif()
             .exits(&[0, 1])
@@ -857,27 +920,22 @@ impl ScannerRegistry {
                 &[
                     "sh",
                     "-c",
-                    "jbang google-java-format@google --dry-run --set-exit-if-changed {target}",
+                    &format!(
+                        "find {{target}} -name '*.java' -print0 | xargs -0 -r java {GJF_EXPORTS} -jar /opt/google-java-format.jar --dry-run --set-exit-if-changed"
+                    ),
                 ],
             )
-            .exits(&[0, 1])
+            .install(&format!(
+                "curl -sSLf https://github.com/google/google-java-format/releases/download/v{GOOGLE_JAVA_FORMAT_VERSION}/google-java-format-{GOOGLE_JAVA_FORMAT_VERSION}-all-deps.jar -o /opt/google-java-format.jar"
+            ))
+            .exits(&[0, 1, XARGS_FOUND])
             .build(),
-            java(
-                "palantir-java-format",
-                "Alternative deterministic Java formatter optimized for diffs.",
-                "Code Formatting",
-                &[
-                    "sh",
-                    "-c",
-                    "jbang palantir-java-format@palantir --dry-run --set-exit-if-changed {target}",
-                ],
-            )
-            .exits(&[0, 1])
-            .build(),
-            java(
+            Builder::new(
                 "dependency-check",
-                "OWASP dependency CVE scanner for Java builds.",
+                "OWASP dependency CVE scanner for Java builds. Set NVD_API_KEY to avoid severe rate limiting.",
                 "Security (SCA)",
+                "java",
+                "ghcr.io/jbangdev/jbang-action:latest",
                 &[
                     "sh",
                     "-c",
@@ -888,30 +946,10 @@ impl ScannerRegistry {
             .exits(&[0, 1])
             .timeout(BUILD_TIMEOUT_SECS)
             .build(),
-            java(
-                "error-prone",
-                "Compiler plugin checks for common Java mistakes.",
-                "Compilation Safety",
-                &[
-                    "sh",
-                    "-c",
-                    "jbang --javac-option=-Xplugin:ErrorProne {target}",
-                ],
-            )
-            .exits(&[0, 1])
-            .build(),
-            java(
-                "jdk-flight-recorder",
-                "JFR-based runtime performance and behavior capture.",
-                "Perf / Analysis",
-                &["sh", "-c", "jbang --jfr {target}"],
-            )
-            .exits(&[0, 1])
-            .build(),
             // -------------------------------------------------------- ruby ---
             ruby(
                 "brakeman",
-                "Static security analysis for Ruby on Rails applications.",
+                "Static security analysis for Ruby on Rails applications. Requires a Rails app layout; errors on a plain Ruby project.",
                 "Security (SAST)",
                 &["sh", "-c", "gem exec brakeman -f json --no-progress"],
             )
@@ -970,8 +1008,10 @@ impl ScannerRegistry {
                 "standardrb",
                 "Zero-config Ruby style and lint checks.",
                 "Linting / Formatting",
-                &["sh", "-c", "gem exec standard"],
+                // standard wraps rubocop, so its JSON is rubocop's JSON.
+                &["sh", "-c", "gem exec standard --format json"],
             )
+            .json()
             .exits(&[0, 1])
             .build(),
             ruby(
@@ -1024,6 +1064,7 @@ impl ScannerRegistry {
                 ],
             )
             .install("composer global require --no-interaction --quiet squizlabs/php_codesniffer")
+            .json()
             .exits(&[0, 1, 2])
             .build(),
             php(
@@ -1052,16 +1093,18 @@ impl ScannerRegistry {
                 "dotnet-format",
                 "Verifies .NET formatting without rewriting files.",
                 "Formatting",
-                &["sh", "-c", "dotnet format --verify-no-changes --verbosity diagnostic"],
+                &["sh", "-c", &format!("{DOTNET_WORKDIR} dotnet format --verify-no-changes --verbosity diagnostic")],
             )
+            .json()
             .exits(&[0, 2])
             .build(),
             dotnet(
                 "roslyn-analyzers",
                 "Compiler analyzer checks via standard .NET build.",
                 "Code Quality",
-                &["sh", "-c", "dotnet build --nologo -warnaserror-"],
+                &["sh", "-c", &format!("{DOTNET_WORKDIR} dotnet build --nologo")],
             )
+            .json()
             .exits(&[0, 1])
             .build(),
             dotnet(
@@ -1071,7 +1114,7 @@ impl ScannerRegistry {
                 &[
                     "sh",
                     "-c",
-                    "dotnet tool install --global dotnet-sonarscanner && dotnet sonarscanner begin /k:\"$SONAR_PROJECT_KEY\" && dotnet build --nologo && dotnet sonarscanner end",
+                    &format!("dotnet tool install --global dotnet-sonarscanner && {DOTNET_WORKDIR} dotnet sonarscanner begin /k:\"$SONAR_PROJECT_KEY\" && dotnet build --nologo && dotnet sonarscanner end"),
                 ],
             )
             .exits(&[0, 1])
@@ -1084,7 +1127,7 @@ impl ScannerRegistry {
                 &[
                     "sh",
                     "-c",
-                    "dotnet tool install --global snyk && snyk test --sarif",
+                    &format!("dotnet tool install --global snyk && {DOTNET_WORKDIR} snyk test --sarif"),
                 ],
             )
             .sarif()
@@ -1097,7 +1140,7 @@ impl ScannerRegistry {
                 &[
                     "sh",
                     "-c",
-                    "dotnet tool install --global JetBrains.ReSharper.GlobalTools && jb inspectcode . --format=Sarif --output=/dev/stdout",
+                    &format!("dotnet tool install --global JetBrains.ReSharper.GlobalTools && {DOTNET_WORKDIR} jb inspectcode . --format=Sarif --output=/dev/stdout"),
                 ],
             )
             .sarif()
@@ -1117,7 +1160,7 @@ impl ScannerRegistry {
             )
             // ubuntu:24.04 ships none of these tools by default.
             .install(&format!("{APT} clang-tidy"))
-            .exits(&[0, 1])
+            .exits(&[0, 1, XARGS_FOUND])
             .build(),
             cpp(
                 "cppcheck",
@@ -1143,7 +1186,7 @@ impl ScannerRegistry {
                 ],
             )
             .install(&format!("{APT} clang-format"))
-            .exits(&[0, 1])
+            .exits(&[0, 1, XARGS_FOUND])
             .build(),
             cpp(
                 "flawfinder",
@@ -1199,7 +1242,15 @@ impl ScannerRegistry {
                 ELIXIR_IMAGE,
                 &["sh", "-c", "mix credo --strict --format json"],
             )
-            .install("mix local.hex --force && mix archive.install hex credo --force")
+            .install(&format!(
+                // Two things the base image cannot do on its own: elixir:*-slim
+                // ships no CA certificates, so every hex fetch dies with
+                // :no_cacerts_found; and `archive.install` does not resolve
+                // dependencies, so credo must be given bunt/jason/file_system
+                // explicitly or it crashes on its first line of output.
+                "{APT} ca-certificates >/dev/null && mix local.hex --force && for pkg in bunt jason file_system credo; do mix archive.install hex $pkg --force; done"
+            ))
+            .json()
             .exits(&[0, 1, 2, 4, 8, 16])
             .build(),
             Builder::new(
@@ -1208,9 +1259,12 @@ impl ScannerRegistry {
                 "Security (SAST)",
                 "elixir",
                 ELIXIR_IMAGE,
-                &["sh", "-c", "mix sobelow --format json"],
+                // Same Jason limitation as credo.
+                &["sh", "-c", "mix sobelow"],
             )
-            .install("mix local.hex --force && mix archive.install hex sobelow --force")
+            .install(&format!(
+                "{APT} ca-certificates >/dev/null && mix local.hex --force && mix archive.install hex sobelow --force"
+            ))
             .exits(&[0, 1])
             .build(),
         ];
@@ -1340,6 +1394,27 @@ mod tests {
                     flag.trim()
                 );
             }
+        }
+    }
+
+    #[test]
+    fn xargs_fanout_scanners_accept_the_xargs_exit_code() {
+        // `find | xargs tool` reports 123 whenever the tool exits non-zero,
+        // which for a linter just means "found something". A scanner that
+        // fans out but does not accept 123 reports every real finding run as
+        // a crash.
+        let registry = ScannerRegistry::new().expect("registry");
+        for scanner in registry.scanners.values() {
+            let command = scanner.command_template.join(" ");
+            if !command.contains("xargs") {
+                continue;
+            }
+            assert!(
+                scanner.success_exit_codes.contains(&super::XARGS_FOUND),
+                "scanner '{}' fans out over xargs but does not accept exit {}",
+                scanner.name,
+                super::XARGS_FOUND
+            );
         }
     }
 

@@ -113,8 +113,10 @@ pub fn normalize_workspace_path(path: &str) -> String {
         .trim_start_matches("file://")
         .trim_start_matches("/workspace/")
         .trim_start_matches("workspace/")
+        // .NET scanners run against a container-local copy of the workspace.
+        .trim_start_matches("/tmp/src/")
         .trim_start_matches("./");
-    if trimmed == "/workspace" || trimmed.is_empty() {
+    if matches!(trimmed, "/workspace" | "/tmp/src") || trimmed.is_empty() {
         return ".".to_string();
     }
     trimmed.to_string()
@@ -133,5 +135,11 @@ mod tests {
         );
         assert_eq!(normalize_workspace_path("file:///workspace/x.py"), "x.py");
         assert_eq!(normalize_workspace_path("/workspace"), ".");
+        // .NET scanners analyse a container-local copy.
+        assert_eq!(
+            normalize_workspace_path("/tmp/src/Program.cs"),
+            "Program.cs"
+        );
+        assert_eq!(normalize_workspace_path("/tmp/src"), ".");
     }
 }

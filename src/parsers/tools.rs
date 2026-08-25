@@ -19,15 +19,20 @@ const SUPPORTED: &[&str] = &[
     "cargo-audit",
     "cargo-clippy",
     "checkov",
+    "credo",
+    "dotnet-format",
     "eslint",
     "grype",
     "kube-linter",
     "npm-audit",
     "osv-scanner",
+    "phpcs",
     "phpstan",
+    "roslyn-analyzers",
     "pip-audit",
     "rubocop",
     "shellcheck",
+    "standardrb",
     "staticcheck",
     "trivy-config",
 ];
@@ -46,14 +51,19 @@ pub fn parse(ctx: &ParseContext<'_>, logs: &str) -> Option<Vec<NormalizedFinding
         "cargo-audit" => cargo_audit(ctx, logs),
         "cargo-clippy" => cargo_clippy(ctx, logs),
         "checkov" => checkov(ctx, logs),
+        "credo" => credo(ctx, logs),
+        // Both emit the standard MSBuild diagnostic line format.
+        "dotnet-format" | "roslyn-analyzers" => msbuild(ctx, logs),
         "eslint" => eslint(ctx, logs),
         "grype" => grype(ctx, logs),
         "kube-linter" => kube_linter(ctx, logs),
         "npm-audit" => npm_audit(ctx, logs),
         "osv-scanner" => osv_scanner(ctx, logs),
+        "phpcs" => phpcs(ctx, logs),
         "phpstan" => phpstan(ctx, logs),
         "pip-audit" => pip_audit(ctx, logs),
-        "rubocop" => rubocop(ctx, logs),
+        // standard is a rubocop wrapper and emits the same report shape.
+        "rubocop" | "standardrb" => rubocop(ctx, logs),
         "shellcheck" => shellcheck(ctx, logs),
         "staticcheck" => staticcheck(ctx, logs),
         "trivy-config" => trivy(ctx, logs),
@@ -503,6 +513,39 @@ fn phpstan(ctx: &ParseContext<'_>, logs: &str) -> Option<Vec<NormalizedFinding>>
     Some(findings)
 }
 
+fn phpcs(ctx: &ParseContext<'_>, logs: &str) -> Option<Vec<NormalizedFinding>> {
+    let document = extract_payload(logs)?;
+    let files = document.get("files")?.as_object()?;
+
+    let mut findings = Vec::new();
+    for (path, entry) in files {
+        for message in array_at(entry, "messages") {
+            // phpcs names the sniff in `source`; `type` is ERROR or WARNING.
+            let sniff = str_field(message, &["source"]).unwrap_or("phpcs");
+            let text = str_field(message, &["message"]).unwrap_or("Coding standard violation");
+
+            findings.push(ctx.finding(
+                sniff,
+                Severity::parse(str_field(message, &["type"]).unwrap_or("warning")),
+                text.to_string(),
+                text.to_string(),
+                Some(path.clone()),
+                u32_field(message, &["line"]),
+                u32_field(message, &["column"]),
+                if message.get("fixable").and_then(Value::as_bool) == Some(true) {
+                    format!("Fixable automatically by phpcbf, or adjust the {sniff} sniff.")
+                } else {
+                    format!("Update the code to satisfy the {sniff} sniff.")
+                },
+                vec![],
+                message.clone(),
+            ));
+        }
+    }
+
+    Some(findings)
+}
+
 // ----------------------------------------------------------------- shell ---
 
 fn shellcheck(ctx: &ParseContext<'_>, logs: &str) -> Option<Vec<NormalizedFinding>> {
@@ -534,6 +577,127 @@ fn shellcheck(ctx: &ParseContext<'_>, logs: &str) -> Option<Vec<NormalizedFindin
         })
         .collect();
     Some(findings)
+}
+
+// ---------------------------------------------------------------- elixir ---
+
+fn credo(ctx: &ParseContext<'_>, logs: &str) -> Option<Vec<NormalizedFinding>> {
+    let document = extract_payload(logs)?;
+    let issues = require_array(&document, "issues")?;
+
+    let findings = issues
+        .iter()
+        .map(|issue| {
+            // credo names the check by its Elixir module path.
+            let check = str_field(issue, &["check"]).unwrap_or("Credo.Check");
+            let message = str_field(issue, &["message"]).unwrap_or("Credo issue");
+            let category = str_field(issue, &["category"]).unwrap_or("readability");
+            // credo priority runs high (positive) to low (negative).
+            let severity = match issue.get("priority").and_then(Value::as_i64) {
+                Some(priority) if priority >= 10 => Severity::High,
+                Some(priority) if priority >= 1 => Severity::Medium,
+                Some(priority) if priority >= 0 => Severity::Low,
+                _ => Severity::Info,
+            };
+
+            ctx.finding(
+                check,
+                if category == "warning" {
+                    Severity::High
+                } else {
+                    severity
+                },
+                message.to_string(),
+                format!("{message} (category: {category})"),
+                str_field(issue, &["filename"]).map(str::to_string),
+                u32_field(issue, &["line_no"]),
+                u32_field(issue, &["column"]),
+                format!("Resolve the {check} issue or configure an exception in .credo.exs."),
+                vec![],
+                issue.clone(),
+            )
+        })
+        .collect();
+    Some(findings)
+}
+
+// ----------------------------------------------------------------- dotnet ---
+
+/// Parse MSBuild diagnostic lines, the shared output format of `dotnet build`
+/// and `dotnet format`:
+///
+/// ```text
+/// /tmp/src/Program.cs(12,17): warning CS0219: The variable is unused [/tmp/src/App.csproj]
+/// ```
+fn msbuild(ctx: &ParseContext<'_>, logs: &str) -> Option<Vec<NormalizedFinding>> {
+    let mut findings = Vec::new();
+    let mut saw_msbuild_output = false;
+
+    for line in logs.lines() {
+        let line = line.trim();
+        // Cheap gate before the more expensive splitting below.
+        if !line.contains("): ") {
+            if line.contains("Build succeeded")
+                || line.contains("Format complete")
+                || line.contains("Error(s)")
+            {
+                saw_msbuild_output = true;
+            }
+            continue;
+        }
+
+        let Some((location, rest)) = line.split_once("): ") else {
+            continue;
+        };
+        let Some((path, position)) = location.rsplit_once('(') else {
+            continue;
+        };
+        // `severity CODE: message [project]`
+        let Some((level_and_code, message)) = rest.split_once(": ") else {
+            continue;
+        };
+        let mut level_parts = level_and_code.split_whitespace();
+        let Some(level) = level_parts.next() else {
+            continue;
+        };
+        if !matches!(level, "error" | "warning" | "info") {
+            continue;
+        }
+        let code = level_parts.next().unwrap_or("MSBUILD");
+
+        let (line_number, column) = match position.split_once(',') {
+            Some((line_text, column_text)) => (
+                line_text.trim().parse::<u32>().ok(),
+                column_text.trim().parse::<u32>().ok(),
+            ),
+            None => (position.trim().parse::<u32>().ok(), None),
+        };
+
+        // Strip the trailing `[project.csproj]` marker from the message.
+        let message = message
+            .rsplit_once(" [")
+            .map(|(text, _)| text)
+            .unwrap_or(message)
+            .trim();
+
+        saw_msbuild_output = true;
+        findings.push(ctx.finding(
+            code,
+            Severity::parse(level),
+            message.to_string(),
+            message.to_string(),
+            Some(path.to_string()),
+            line_number,
+            column,
+            format!("Resolve {code}, or suppress it deliberately in .editorconfig."),
+            vec![],
+            json!({ "line": line, "code": code, "level": level }),
+        ));
+    }
+
+    // Without any recognizable MSBuild output the tool did not get far enough
+    // to report; that is not a clean build.
+    saw_msbuild_output.then_some(findings)
 }
 
 // -------------------------------------------------------------- security ---
@@ -1142,6 +1306,60 @@ mod tests {
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].id, "RUSTSEC-2021-0001");
         assert!(findings[0].remediation.contains(">=0.1.2"));
+    }
+
+    #[test]
+    fn parses_credo_issues() {
+        let logs = r#"{"issues":[{"category":"readability","check":"Credo.Check.Readability.ModuleDoc","column":11,"filename":"lib/app.ex","line_no":4,"message":"Modules should have a @moduledoc tag.","priority":1,"scope":"AuditFixture.App"}]}"#;
+        let findings = run("credo", logs);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].id, "Credo.Check.Readability.ModuleDoc");
+        assert_eq!(findings[0].severity, "medium");
+        assert_eq!(findings[0].location.path.as_deref(), Some("lib/app.ex"));
+        assert_eq!(findings[0].location.line, Some(4));
+    }
+
+    #[test]
+    fn parses_msbuild_diagnostic_lines() {
+        let logs = concat!(
+            "  Determining projects to restore...\n",
+            "/tmp/src/Program.cs(12,17): warning CS0219: The variable 'unused' is assigned but its value is never used [/tmp/src/App.csproj]\n",
+            "/tmp/src/Program.cs(15,9): error WHITESPACE: Fix whitespace formatting. Delete 4 characters. [/tmp/src/App.csproj]\n",
+            "Build succeeded.\n",
+        );
+        let findings = run("roslyn-analyzers", logs);
+        assert_eq!(findings.len(), 2);
+        assert_eq!(findings[0].id, "CS0219");
+        assert_eq!(findings[0].severity, "medium");
+        // The container-local copy prefix is mapped back to a repo path.
+        assert_eq!(findings[0].location.path.as_deref(), Some("Program.cs"));
+        assert_eq!(findings[0].location.line, Some(12));
+        assert_eq!(findings[0].location.column, Some(17));
+        // The trailing [project] marker is not part of the message.
+        assert!(!findings[0].title.contains("csproj"));
+        assert_eq!(findings[1].id, "WHITESPACE");
+        assert_eq!(findings[1].severity, "high");
+    }
+
+    #[test]
+    fn msbuild_output_that_never_ran_is_unrecognized() {
+        let definition = scanner("roslyn-analyzers");
+        let ctx = ParseContext::new(&definition, "repo");
+        assert!(parse(&ctx, "MSBUILD : error MSB1001: Unknown switch.").is_none());
+    }
+
+    #[test]
+    fn parses_phpcs_sniff_violations() {
+        let logs = r#"{"totals":{"errors":1},"files":{"\/workspace\/src\/App.php":{"messages":[{"message":"Header blocks must be separated by a single blank line","source":"PSR12.Files.FileHeader.SpacingAfterTagBlock","severity":5,"fixable":true,"type":"ERROR","line":1,"column":1}]}}}"#;
+        let findings = run("phpcs", logs);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(
+            findings[0].id,
+            "PSR12.Files.FileHeader.SpacingAfterTagBlock"
+        );
+        assert_eq!(findings[0].severity, "high");
+        assert_eq!(findings[0].location.path.as_deref(), Some("src/App.php"));
+        assert!(findings[0].remediation.contains("phpcbf"));
     }
 
     #[test]

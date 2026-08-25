@@ -8,19 +8,40 @@
 //!   cargo test --test scanner_smoke -- --ignored --nocapture
 //!
 //! They are split by cost so the fast tier can be run routinely:
-//!   * `smoke_fast_tier`   — python/node/iac/security/shell/c-cpp images
-//!   * `smoke_slow_tier`   — rust/go/java/dotnet, which compile before scanning
+//!   * `smoke_fast_tier`    — python/node/iac/security/shell/c-cpp images
+//!   * `smoke_slow_tier`    — rust/go, which compile a toolchain before scanning
+//!   * `smoke_jvm_tier`     — java/kotlin, which resolve artifacts on first run
+//!   * `smoke_scripting_tier` — ruby/php
+//!   * `smoke_dotnet_tier`  — .NET SDK
+//!   * `smoke_elixir_tier`  — elixir/mix
 //!
 //! A scanner "passes" when it does not come back as `tool_error`. Finding
 //! nothing is a pass; being unable to run is not.
 
-use audit_mcp::models::RunStatus;
+use audit_mcp::models::{OutputFormat, RunStatus};
 use audit_mcp::runner::{DockerScannerRunner, ScanOptions};
 use audit_mcp::scanners::ScannerRegistry;
 use bollard::Docker;
 
 fn fixture(name: &str) -> String {
     format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"))
+}
+
+/// Resolve a fixture, preferring an external corpus when one is configured.
+///
+/// Set `AUDIT_MCP_CORPUS` to a directory of real example projects (for
+/// instance a sibling checkout's `examples/`) to smoke the scanners against
+/// realistic code instead of the minimal in-repo fixtures. A name that is not
+/// present in the corpus falls back to the in-repo fixture, so the suite still
+/// runs anywhere.
+fn corpus_or_fixture(corpus_name: &str, fallback: &str) -> String {
+    if let Ok(root) = std::env::var("AUDIT_MCP_CORPUS") {
+        let candidate = std::path::Path::new(&root).join(corpus_name);
+        if candidate.is_dir() {
+            return candidate.to_string_lossy().into_owned();
+        }
+    }
+    fixture(fallback)
 }
 
 async fn docker_available() -> bool {
@@ -40,7 +61,21 @@ fn fixture_for(scanner: &str) -> String {
         "hadolint" => fixture("hadolint"),
         "kube-linter" | "kubesec" => fixture("k8s"),
         "checkov" | "tfsec" | "terrascan" | "trivy-config" => fixture("detect/terraform"),
-        "staticcheck" | "gosec" | "govulncheck" | "golangci-lint" => fixture("go"),
+        "staticcheck" | "gosec" | "govulncheck" | "golangci-lint" => {
+            corpus_or_fixture("go-fixture", "go")
+        }
+        "spotbugs"
+        | "pmd"
+        | "checkstyle"
+        | "google-java-format"
+        | "palantir-java-format"
+        | "dependency-check" => corpus_or_fixture("java-maven-fixture", "java"),
+        "detekt" | "ktlint" => corpus_or_fixture("kotlin-fixture", "kotlin"),
+        "brakeman" | "bundler-audit" | "rubocop" | "debride" | "flay" | "flog" | "standardrb"
+        | "license_finder" => fixture("ruby"),
+        "phpstan" | "psalm" | "phpcs" | "rector" => fixture("php"),
+        "dotnet-format" | "roslyn-analyzers" => fixture("dotnet"),
+        "credo" | "sobelow" => fixture("elixir"),
         // The repository itself is the most realistic Rust target available.
         scanner if scanner.starts_with("cargo-") => env!("CARGO_MANIFEST_DIR").to_string(),
         _ => fixture("multi"),
@@ -95,9 +130,9 @@ async fn check(runner: &DockerScannerRunner, scanner: &str) -> Option<String> {
                 .take(400)
                 .collect::<String>()
         )),
-        // A structured scanner that came back unparsed emitted output its
-        // declared parser could not read, which is a real regression.
-        RunStatus::Unparsed => Some(format!(
+        // Only a scanner that *claims* structured output has regressed here;
+        // a text-output scanner is expected to come back unparsed.
+        RunStatus::Unparsed if definition.output_format != OutputFormat::Text => Some(format!(
             "{scanner}: declared structured output but nothing parsed"
         )),
         _ => None,
@@ -171,4 +206,47 @@ async fn smoke_slow_tier() {
         "cargo-audit",
     ])
     .await;
+}
+
+/// JVM scanners. These resolve their own tooling through jbang or a direct
+/// download on first run, so the first pass is slow and later ones are cached.
+#[tokio::test]
+#[ignore]
+async fn smoke_jvm_tier() {
+    run_tier(&[
+        "pmd",
+        "checkstyle",
+        "google-java-format",
+        "detekt",
+        "ktlint",
+    ])
+    .await;
+}
+
+/// Ruby and PHP, whose base images ship no analyzers and install them first.
+#[tokio::test]
+#[ignore]
+async fn smoke_scripting_tier() {
+    run_tier(&[
+        "rubocop",
+        // brakeman is intentionally absent: it requires a Rails application
+        // layout and errors on a plain Ruby project.
+        "bundler-audit",
+        "standardrb",
+        "phpstan",
+        "phpcs",
+    ])
+    .await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn smoke_dotnet_tier() {
+    run_tier(&["dotnet-format", "roslyn-analyzers"]).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn smoke_elixir_tier() {
+    run_tier(&["credo", "sobelow"]).await;
 }

@@ -87,10 +87,14 @@ The Docker layer. `DockerScannerRunner` owns a `bollard::Docker` client and is r
 | Workspace mount | `:ro`                    | Scanner cannot modify source   |
 | `SecurityOpt`   | `no-new-privileges:true` | Blocks setuid/sudo escalation  |
 | `CapDrop`       | `ALL`                    | Removes all Linux capabilities |
+| `CapAdd`        | `DAC_READ_SEARCH`        | Read-only exception, see below |
 | `Memory`        | 4 GB                     | Bounds compiler memory usage   |
 | Concurrency     | 4 containers (default)   | 4 GB each; unbounded fan-out OOMs the host |
 
-Because all capabilities are dropped, root inside the container has no `CAP_DAC_OVERRIDE` and cannot write to apt's `_apt`-owned cache directories. The `APT` install prefix in `scanners.rs` relocates apt's archive and list directories under `/tmp` instead of relaxing the sandbox.
+Dropping every capability has two consequences worth knowing about, because both look like unrelated scanner bugs:
+
+- Root in the container cannot **write** to apt's `_apt`-owned cache directories. The `APT` install prefix in `scanners.rs` relocates apt's archive and list directories under `/tmp` rather than relaxing the sandbox.
+- Root in the container cannot **read** a host directory with mode `0700` — a build output or cache directory is enough to fail a whole scan with "permission denied", which is how `govulncheck` died on a real repository containing a `dist/` directory. `DAC_READ_SEARCH` is added back for exactly this: it bypasses read permission checks and nothing else. It grants no write access (the mount is read-only) and no path to privilege escalation, and it only lets a scanner read the tree the caller explicitly pointed it at.
 
 **Cache volumes** are named Docker volumes mounted at `/cache/*` inside the container. Environment variables (`CARGO_HOME`, `UV_CACHE_DIR`, `GEM_HOME`, etc.) redirect each ecosystem's tooling to those paths. This means package downloads and compiled artifacts persist across runs without any host filesystem exposure.
 
@@ -169,6 +173,14 @@ Three layers:
 - **Unit tests** — `#[cfg(test)]` modules inline in `models.rs`, `parsers/*`, `runner.rs`, `scanners.rs`, `selection.rs`, and `server.rs`. No Docker required; part of the default `cargo test` run. The parser tests pin real tool output shapes, and the registry tests enforce the catalog invariants above.
 - **End-to-end tests** — `tests/e2e_scan.rs`. Runs real scanner containers via `DockerScannerRunner` through the full `AuditMcpServer` tool surface (`run_scan`, `list_scanners`, `explain_finding`) against fixtures in `tests/fixtures/`. Each Docker-dependent test is `#[ignore]`d and self-skips (with a message) if no daemon is reachable, so `cargo test` alone stays fast and hermetic. Run explicitly with `cargo test --test e2e_scan -- --ignored` whenever a change touches `runner.rs`, a scanner's `command_template`, or `image_cache_config`.
 
-- **Scanner smoke tests** — `tests/scanner_smoke.rs`. Runs every scanner that declares structured output against a matching fixture and asserts it does not come back as `tool_error`, `timeout`, or `unparsed`. Split into `smoke_fast_tier` (small images) and `smoke_slow_tier` (Go/Rust, which compile first). This is the only layer that catches a command template no image can execute — a swallowed ENTRYPOINT, a renamed flag, a tool missing from the base image. Run it after any change to a `command_template`, an image, or an install script.
+- **Scanner smoke tests** — `tests/scanner_smoke.rs`. Runs every scanner that declares structured output against a matching fixture and asserts it does not come back as `tool_error`, `timeout`, or `unparsed`. Split by cost into `smoke_fast_tier`, `smoke_slow_tier` (Go/Rust, which compile first), `smoke_jvm_tier`, `smoke_scripting_tier` (Ruby/PHP), `smoke_dotnet_tier`, and `smoke_elixir_tier`. This is the only layer that catches a command template no image can execute — a swallowed ENTRYPOINT, a renamed flag, a tool missing from the base image, a `-quiet` that suppresses the whole report. Run it after any change to a `command_template`, an image, or an install script.
+
+  Set `AUDIT_MCP_CORPUS` to a directory of real example projects to smoke the scanners against realistic code instead of the minimal in-repo fixtures:
+
+  ```bash
+  AUDIT_MCP_CORPUS=../paws/examples cargo test --test scanner_smoke -- --ignored --nocapture
+  ```
+
+  A name absent from the corpus falls back to the in-repo fixture, so the suite still runs anywhere. Real projects are worth the extra pass: the corpus run is what exposed both the `0700` directory failure and gosec's `-quiet` behaviour, neither of which the minimal fixtures could reproduce.
 
 When adding a new e2e case, assert on **normalized findings** — rule ID, severity, file, line — not on substrings of raw logs. Log-grepping assertions pass even when normalization is broken, which is precisely the failure this suite exists to catch.

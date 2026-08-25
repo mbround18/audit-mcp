@@ -180,6 +180,16 @@ impl DockerScannerRunner {
                         security_opt: Some(vec!["no-new-privileges:true".to_string()]),
                         // Scanners are analysis tools, not system daemons.
                         cap_drop: Some(vec!["ALL".to_string()]),
+                        // ...with one exception. Dropping every capability
+                        // also drops CAP_DAC_READ_SEARCH, so root inside the
+                        // container cannot read a directory the host owns with
+                        // mode 0700 — a build output or cache directory is
+                        // enough to make a whole scan fail with "permission
+                        // denied". Restoring only the read-side capability lets
+                        // scanners read the tree the caller explicitly asked
+                        // them to scan. It grants no write access (the mount is
+                        // read-only) and no path to privilege escalation.
+                        cap_add: Some(vec!["DAC_READ_SEARCH".to_string()]),
                         memory: Some(CONTAINER_MEMORY_BYTES),
                         ..Default::default()
                     }),

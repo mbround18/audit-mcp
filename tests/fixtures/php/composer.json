@@ -1,0 +1,11 @@
+{
+  "name": "example/audit-php-fixture",
+  "description": "Deliberately flawed PHP fixture for scanner verification",
+  "type": "project",
+  "require": {
+    "php": ">=8.1"
+  },
+  "autoload": {
+    "psr-4": { "Example\\": "src/" }
+  }
+}
