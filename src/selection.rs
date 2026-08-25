@@ -1,7 +1,187 @@
+use std::{
+    collections::{BTreeSet, VecDeque},
+    path::Path,
+};
+
 use crate::{
     models::{LanguageToolProfile, ToolSelectionPlan},
     scanners::ScannerRegistry,
 };
+
+/// Depth of the bounded directory walk used for language detection.
+const MAX_DEPTH: usize = 4;
+/// Upper bound on entries inspected, so a huge monorepo cannot stall a scan.
+const MAX_ENTRIES: usize = 20_000;
+
+/// Directories that never carry useful detection signal and are expensive to
+/// walk (dependency trees, build output, VCS metadata).
+const IGNORED_DIRS: &[&str] = &[
+    ".git",
+    ".hg",
+    ".svn",
+    "node_modules",
+    "target",
+    "vendor",
+    "dist",
+    "build",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".tox",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".next",
+    ".nuxt",
+    ".gradle",
+    ".idea",
+    "obj",
+    ".terraform",
+    "coverage",
+    "_build",
+    "deps",
+    ".bundle",
+    "Pods",
+];
+
+/// Filenames that identify an ecosystem on sight.
+const MANIFESTS: &[(&str, &str)] = &[
+    ("Cargo.toml", "rust"),
+    ("go.mod", "go"),
+    ("go.sum", "go"),
+    ("package.json", "node"),
+    ("pnpm-lock.yaml", "node"),
+    ("tsconfig.json", "node"),
+    ("pyproject.toml", "python"),
+    ("requirements.txt", "python"),
+    ("setup.py", "python"),
+    ("setup.cfg", "python"),
+    ("Pipfile", "python"),
+    ("pom.xml", "java"),
+    ("build.gradle", "java"),
+    ("settings.gradle", "java"),
+    ("Gemfile", "ruby"),
+    ("Gemfile.lock", "ruby"),
+    ("composer.json", "php"),
+    ("composer.lock", "php"),
+    ("CMakeLists.txt", "c-cpp"),
+    ("Dockerfile", "iac"),
+    ("docker-compose.yml", "iac"),
+    ("docker-compose.yaml", "iac"),
+    ("Chart.yaml", "iac"),
+    ("kustomization.yaml", "iac"),
+    ("mix.exs", "elixir"),
+    ("build.gradle.kts", "kotlin"),
+    ("settings.gradle.kts", "kotlin"),
+];
+
+/// File extensions that identify an ecosystem.
+const EXTENSIONS: &[(&str, &str)] = &[
+    ("rs", "rust"),
+    ("go", "go"),
+    ("py", "python"),
+    ("js", "node"),
+    ("jsx", "node"),
+    ("ts", "node"),
+    ("tsx", "node"),
+    ("mjs", "node"),
+    ("cjs", "node"),
+    ("java", "java"),
+    ("rb", "ruby"),
+    ("gemspec", "ruby"),
+    ("php", "php"),
+    ("cs", "dotnet"),
+    ("csproj", "dotnet"),
+    ("fsproj", "dotnet"),
+    ("sln", "dotnet"),
+    ("c", "c-cpp"),
+    ("cc", "c-cpp"),
+    ("cpp", "c-cpp"),
+    ("cxx", "c-cpp"),
+    ("h", "c-cpp"),
+    ("hh", "c-cpp"),
+    ("hpp", "c-cpp"),
+    ("hxx", "c-cpp"),
+    ("tf", "iac"),
+    ("tfvars", "iac"),
+    ("sh", "shell"),
+    ("bash", "shell"),
+    ("zsh", "shell"),
+    ("kt", "kotlin"),
+    ("kts", "kotlin"),
+    ("ex", "elixir"),
+    ("exs", "elixir"),
+    ("sql", "sql"),
+    ("ddl", "sql"),
+];
+
+/// What a target directory was found to contain.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProjectDetection {
+    pub languages: BTreeSet<String>,
+    /// Files that produced the detection, for auditability.
+    pub evidence: Vec<String>,
+}
+
+/// Classify a single file name into a language, manifest names first.
+fn classify(file_name: &str) -> Option<&'static str> {
+    if let Some((_, language)) = MANIFESTS
+        .iter()
+        .find(|(manifest, _)| manifest.eq_ignore_ascii_case(file_name))
+    {
+        return Some(language);
+    }
+
+    // Dockerfile.dev, prod.Dockerfile, and friends.
+    if file_name.starts_with("Dockerfile.") || file_name.ends_with(".Dockerfile") {
+        return Some("iac");
+    }
+
+    let extension = file_name.rsplit_once('.').map(|(_, ext)| ext)?;
+    EXTENSIONS
+        .iter()
+        .find(|(candidate, _)| candidate.eq_ignore_ascii_case(extension))
+        .map(|(_, language)| *language)
+}
+
+/// Walk `dir` breadth-first, bounded in depth and entry count, and report
+/// every ecosystem found. Unreadable directories are skipped rather than
+/// failing the scan — partial detection beats no detection.
+pub fn detect_languages(dir: &Path) -> ProjectDetection {
+    let mut detection = ProjectDetection::default();
+    let mut queue = VecDeque::from([(dir.to_path_buf(), 0_usize)]);
+    let mut inspected = 0_usize;
+
+    while let Some((current, depth)) = queue.pop_front() {
+        let Ok(entries) = std::fs::read_dir(&current) else {
+            continue;
+        };
+
+        for entry in entries.flatten() {
+            if inspected >= MAX_ENTRIES {
+                return detection;
+            }
+            inspected += 1;
+
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let is_dir = entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
+
+            if is_dir {
+                if depth < MAX_DEPTH && !IGNORED_DIRS.contains(&name.as_str()) {
+                    queue.push_back((entry.path(), depth + 1));
+                }
+                continue;
+            }
+
+            if let Some(language) = classify(&name)
+                && detection.languages.insert(language.to_string())
+            {
+                detection.evidence.push(name);
+            }
+        }
+    }
+
+    detection
+}
 
 #[derive(Debug, Clone)]
 pub struct ToolSelector {
@@ -47,8 +227,9 @@ impl ToolSelector {
                         "eslint".to_string(),
                         "depcheck".to_string(),
                         "license-checker".to_string(),
-                        "lighthouse".to_string(),
-                        "bundlephobia".to_string(),
+                        // lighthouse/bundlephobia take a URL or package name,
+                        // not a repository path, so they are catalog-only and
+                        // never auto-selected.
                         "oxlint".to_string(),
                         "npm-audit".to_string(),
                     ],
@@ -282,14 +463,71 @@ impl Default for ToolSelector {
 }
 
 impl ToolSelector {
+    /// Build a scanner selection for `target`.
+    ///
+    /// Detection reads the target's *contents* when it exists on disk — a
+    /// directory is walked for manifests and source extensions, a file is
+    /// classified by its own name. Only when the path cannot be inspected do
+    /// we fall back to the old string heuristic, so callers passing a
+    /// hypothetical path still get a sensible answer.
     pub fn plan(&self, target: &str, registry: &ScannerRegistry) -> ToolSelectionPlan {
-        let mut selected_scanners = Vec::new();
-        let target_language = Self::infer_language(target);
+        let path = Path::new(target);
+        let (languages, evidence, rationale) = if path.is_dir() {
+            let detection = detect_languages(path);
+            let rationale = if detection.languages.is_empty() {
+                format!(
+                    "No ecosystem markers found under '{target}'; running the always-on cross-language security layer only."
+                )
+            } else {
+                format!(
+                    "Detected {} from files in '{target}'; unioned each ecosystem's profile with the always-on security layer.",
+                    detection
+                        .languages
+                        .iter()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            };
+            (
+                detection.languages.into_iter().collect::<Vec<_>>(),
+                detection.evidence,
+                rationale,
+            )
+        } else if path.is_file() {
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let language = classify(&name).map(str::to_string);
+            let rationale = match &language {
+                Some(language) => {
+                    format!(
+                        "Target is a single {language} file; selected that ecosystem's profile plus the security layer."
+                    )
+                }
+                None => format!(
+                    "Target file '{name}' matches no known ecosystem; running the security layer only."
+                ),
+            };
+            (
+                language.into_iter().collect::<Vec<_>>(),
+                vec![name],
+                rationale,
+            )
+        } else {
+            let language = Self::infer_language(target);
+            let rationale = format!(
+                "Target '{target}' is not present on this host; fell back to inferring the ecosystem from the path string."
+            );
+            (language.into_iter().collect::<Vec<_>>(), vec![], rationale)
+        };
 
+        let mut selected_scanners = Vec::new();
         for profile in &self.language_profiles {
+            // The security profile is cross-language and always applies.
             let is_cross_language = profile.language == "security";
-            let matches_target = target_language.as_deref() == Some(profile.language.as_str());
-            if is_cross_language || matches_target {
+            if is_cross_language || languages.contains(&profile.language) {
                 selected_scanners.extend(profile.preferred_scanners.clone());
             }
         }
@@ -301,7 +539,9 @@ impl ToolSelector {
         ToolSelectionPlan {
             phase: "observability".to_string(),
             selected_scanners,
-            rationale: "Initial selection uses lightweight repository context (target shape and baseline security coverage) and is designed to be replaced by language/tool inventory inputs.".to_string(),
+            rationale,
+            detected_languages: languages,
+            evidence,
         }
     }
 
@@ -428,8 +668,96 @@ impl ToolSelector {
 
 #[cfg(test)]
 mod tests {
-    use super::ToolSelector;
+    use super::{ToolSelector, detect_languages};
     use crate::scanners::ScannerRegistry;
+    use std::path::PathBuf;
+
+    fn fixture(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/detect")
+            .join(name)
+    }
+
+    #[test]
+    fn detects_every_ecosystem_present_in_a_polyglot_repo() {
+        let detection = detect_languages(&fixture("polyglot"));
+        let languages = detection.languages.iter().cloned().collect::<Vec<_>>();
+
+        assert!(languages.contains(&"python".to_string()), "{languages:?}");
+        assert!(languages.contains(&"node".to_string()), "{languages:?}");
+        assert!(languages.contains(&"iac".to_string()), "{languages:?}");
+        assert!(languages.contains(&"shell".to_string()), "{languages:?}");
+        // A vendored .go file inside node_modules must not be counted.
+        assert!(!languages.contains(&"go".to_string()), "{languages:?}");
+        assert!(!detection.evidence.is_empty());
+    }
+
+    #[test]
+    fn detects_nothing_in_a_directory_without_markers() {
+        let detection = detect_languages(&fixture("empty"));
+        assert!(detection.languages.is_empty());
+    }
+
+    #[test]
+    fn stops_walking_past_the_depth_bound() {
+        // deep.rs sits five directories down, past MAX_DEPTH.
+        let detection = detect_languages(&fixture("deep"));
+        assert!(detection.languages.is_empty(), "{detection:?}");
+    }
+
+    #[test]
+    fn plan_uses_directory_contents_not_the_path_string() {
+        let registry = ScannerRegistry::new().expect("registry");
+        let selector = ToolSelector::new();
+        let plan = selector.plan(fixture("terraform").to_str().expect("utf-8"), &registry);
+
+        assert_eq!(plan.detected_languages, vec!["iac".to_string()]);
+        assert!(plan.evidence.contains(&"main.tf".to_string()));
+        assert!(plan.selected_scanners.contains(&"checkov".to_string()));
+        assert!(plan.selected_scanners.contains(&"semgrep".to_string()));
+    }
+
+    #[test]
+    fn plan_over_a_polyglot_directory_unions_every_profile() {
+        let registry = ScannerRegistry::new().expect("registry");
+        let selector = ToolSelector::new();
+        let plan = selector.plan(fixture("polyglot").to_str().expect("utf-8"), &registry);
+
+        // Python, Node, IaC and shell scanners must all be selected together.
+        for name in ["bandit", "eslint", "checkov", "shellcheck", "gitleaks"] {
+            assert!(
+                plan.selected_scanners.contains(&name.to_string()),
+                "expected '{name}' in polyglot plan: {:?}",
+                plan.selected_scanners
+            );
+        }
+        // No Rust or Go scanners: neither ecosystem is present.
+        assert!(!plan.selected_scanners.contains(&"cargo-clippy".to_string()));
+        assert!(!plan.selected_scanners.contains(&"gosec".to_string()));
+    }
+
+    #[test]
+    fn plan_classifies_a_single_file_target() {
+        let registry = ScannerRegistry::new().expect("registry");
+        let selector = ToolSelector::new();
+        let path = fixture("polyglot/services/api/app.py");
+        let plan = selector.plan(path.to_str().expect("utf-8"), &registry);
+
+        assert_eq!(plan.detected_languages, vec!["python".to_string()]);
+        assert!(plan.selected_scanners.contains(&"bandit".to_string()));
+        assert!(!plan.selected_scanners.contains(&"eslint".to_string()));
+    }
+
+    #[test]
+    fn plan_falls_back_to_path_inference_for_paths_that_do_not_exist() {
+        let registry = ScannerRegistry::new().expect("registry");
+        let selector = ToolSelector::new();
+        let plan = selector.plan("/nonexistent/project/main.go", &registry);
+
+        assert_eq!(plan.detected_languages, vec!["go".to_string()]);
+        assert!(plan.rationale.contains("not present on this host"));
+        assert!(plan.selected_scanners.contains(&"gosec".to_string()));
+    }
 
     #[test]
     fn selects_python_scanners_for_python_target() {
@@ -469,8 +797,6 @@ mod tests {
             "eslint",
             "depcheck",
             "license-checker",
-            "lighthouse",
-            "bundlephobia",
             "oxlint",
             "npm-audit",
             "semgrep",
@@ -479,6 +805,19 @@ mod tests {
             assert!(
                 plan.selected_scanners.contains(&(*name).to_string()),
                 "expected '{name}' in node plan"
+            );
+        }
+
+        // These take a URL or package name rather than a repository path, so
+        // they must never be auto-selected.
+        for name in &["lighthouse", "bundlephobia"] {
+            assert!(
+                !plan.selected_scanners.contains(&(*name).to_string()),
+                "'{name}' must not be auto-selected"
+            );
+            assert!(
+                registry.get(name).is_some(),
+                "'{name}' should still be in the catalog for explicit use"
             );
         }
     }

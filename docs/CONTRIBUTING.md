@@ -30,6 +30,11 @@ cargo test
 # needs a reachable Docker daemon and network access to pull images
 cargo test --test e2e_scan -- --ignored
 
+# verify every structured scanner's command actually executes in its image.
+# REQUIRED after touching a command_template, an image, or an install script:
+# no unit test can tell you that a command is unrunnable.
+cargo test --test scanner_smoke -- --ignored --nocapture
+
 # lint — must pass with no warnings
 cargo clippy -- -D warnings
 

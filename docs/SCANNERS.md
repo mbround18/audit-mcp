@@ -2,6 +2,34 @@
 
 Complete reference for all scanners supported by `audit-mcp`. Every scanner runs in an isolated Docker container with the workspace mounted read-only.
 
+## Normalized output
+
+A scanner is **normalized** when `audit-mcp` parses its output into structured findings (rule ID, severity, file, line, remediation). Everything else returns raw logs with status `unparsed`. `list_scanners` reports this per scanner via the `normalized` field.
+
+Normalized via the generic **SARIF** parser:
+
+`semgrep`, `gitleaks`, `hadolint`, `ruff`, `tfsec`, `terrascan`, `bearer`, `gosec`, `govulncheck`, `golangci-lint`, `snyk`, `snyk-java`, `dotnet-snyk`, `jb-inspectcode`, `pmd`, `checkstyle`, `dependency-check`, `psalm`, `flawfinder`, `detekt`, `ktlint`
+
+Normalized via a **tool-native JSON** parser:
+
+`bandit`, `pip-audit`, `eslint`, `npm-audit`, `shellcheck`, `cargo-clippy`, `cargo-audit`, `staticcheck`, `rubocop`, `phpstan`, `grype`, `osv-scanner`, `checkov`, `trivy-config`, `kube-linter`
+
+Everything else runs and returns raw logs. Adding a parser is the most valuable contribution you can make — see [ARCHITECTURE.md](ARCHITECTURE.md).
+
+## Exit codes
+
+Each scanner declares the exit codes that mean "ran correctly". Most linters exit `1` simply because they found something, which is not a failure. An exit code outside the declared set is reported as `tool_error` with the logs attached — unless the scanner nonetheless produced parseable findings, in which case the results are trusted.
+
+No scanner wraps its command in `|| true`: that would make a crash indistinguishable from a clean run, which is the failure mode this design exists to prevent.
+
+## Read-only workspace
+
+The workspace is mounted read-only, so every formatter runs in **check mode** (`--check`, `--dry-run`, `-l`) and reports what would change rather than rewriting files. A scanner using an in-place write flag is rejected by a unit test.
+
+## Timeouts
+
+Every scanner has a wall-clock budget: 600 s by default, 900 s for Go and JVM scanners that compile a tool first, 1800 s for Rust scanners that build the project, 3600 s for `cargo-mutants`. Exceeding it kills the container and reports status `timeout`. Override per request with `timeout_secs`.
+
 ## Auth environment variables
 
 Scanners only receive an allowlisted set of host environment variables. Required values:
@@ -25,9 +53,9 @@ Base image: `rust:latest`
 | Scanner           | Category           | Description                                                   |
 | ----------------- | ------------------ | ------------------------------------------------------------- |
 | `cargo-audit`     | Security (SCA)     | Audits `Cargo.lock` against the RustSec advisory database     |
-| `cargo-clippy`    | Linting            | Runs Clippy with `-D warnings` — fails on any lint            |
+| `cargo-clippy`    | Linting            | Runs Clippy over all targets; diagnostics are normalized from cargo's JSON |
 | `cargo-deny`      | Security & License | Validates dependency graph, license policy, and denied crates |
-| `cargo-fmt`       | Formatting         | Checks formatting with `--check` — fails on any diff          |
+| `cargo-fmt`       | Formatting         | Checks formatting with `--check`; never rewrites files        |
 | `cargo-machete`   | Optimization       | Detects unused dependencies in `Cargo.toml`                   |
 | `cargo-bloat`     | Performance        | Reports binary size contribution per crate and symbol         |
 | `cargo-tarpaulin` | Test Coverage      | Line coverage via instrumentation                             |
@@ -41,7 +69,9 @@ Cache volumes: `audit-cargo-home` (shared registry + binaries), `audit-target-<s
 
 ## Go
 
-Base image: `golang:1.24-bookworm`
+Base image: `golang:1.25-bookworm`
+
+`GOTOOLCHAIN=auto` is set so `go run tool@latest` can fetch a newer toolchain when a tool's `go.mod` requires one. Without it every Go scanner fails as soon as its tool outruns the base image.
 
 | Scanner         | Category          | Description                                                             |
 | --------------- | ----------------- | ----------------------------------------------------------------------- |

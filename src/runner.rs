@@ -1,72 +1,142 @@
-use std::{env, path::PathBuf};
+use std::{env, path::PathBuf, time::Duration, time::Instant};
 
+use bollard::container::LogOutput;
 use bollard::{
     Docker,
     errors::Error as BollardError,
     models::{ContainerCreateBody, HostConfig},
     query_parameters::{
-        CreateContainerOptionsBuilder, CreateImageOptionsBuilder, LogsOptionsBuilder,
-        RemoveContainerOptionsBuilder,
+        CreateContainerOptionsBuilder, CreateImageOptionsBuilder, KillContainerOptionsBuilder,
+        LogsOptionsBuilder, RemoveContainerOptionsBuilder,
     },
 };
 use futures_util::{StreamExt, TryStreamExt};
-use serde_json::{Value, json};
+use tokio::sync::OnceCell;
 use uuid::Uuid;
 
-use crate::models::{FindingLocation, NormalizedFinding, ScanExecution, ScannerDefinition};
+use crate::models::{RunStatus, ScanExecution, ScannerDefinition, ScannerRunResult};
+use crate::parsers::{self, ParseContext};
+use crate::scanners::DEFAULT_TIMEOUT_SECS;
 
-#[derive(Debug, Clone)]
+/// Hard ceiling on captured container output, so a runaway scanner cannot
+/// exhaust memory. Parsers see the full buffer up to this size.
+const MAX_LOG_BYTES: usize = 8 * 1024 * 1024;
+/// How much of the log stream is echoed back to the MCP client.
+const LOG_EXCERPT_CHARS: usize = 24_000;
+/// Memory ceiling per scanner container. Compilation is memory-hungry but
+/// should not be unbounded.
+const CONTAINER_MEMORY_BYTES: i64 = 4 * 1024 * 1024 * 1024;
+
+/// Container output, with stdout kept separate from the interleaved view.
+#[derive(Debug, Default)]
+struct ContainerOutput {
+    stdout: String,
+    combined: String,
+}
+
+/// Per-run knobs supplied by the caller.
+#[derive(Debug, Clone, Default)]
+pub struct ScanOptions {
+    /// Wall-clock ceiling; overrides the scanner's own default when set.
+    pub timeout: Option<Duration>,
+    /// Echo raw stdout/stderr back even on success.
+    pub include_raw_logs: bool,
+}
+
+/// Runs scanners in ephemeral Docker containers.
+///
+/// The Docker client is connected lazily so the MCP server starts (and can
+/// answer `list_scanners`/`explain_finding`) even with no daemon running.
+#[derive(Debug, Default)]
 pub struct DockerScannerRunner {
-    docker: Docker,
+    docker: OnceCell<Docker>,
 }
 
 impl DockerScannerRunner {
-    pub fn new() -> anyhow::Result<Self> {
-        let docker = Docker::connect_with_local_defaults()?;
-        Ok(Self { docker })
+    pub fn new() -> Self {
+        Self {
+            docker: OnceCell::new(),
+        }
+    }
+
+    /// Connect and ping on first use. Failures are not cached, so a daemon
+    /// that starts later is picked up on the next scan.
+    async fn client(&self) -> Result<&Docker, String> {
+        self.docker
+            .get_or_try_init(|| async {
+                let docker = Docker::connect_with_local_defaults()
+                    .map_err(|err| format!("failed to create Docker client: {err}"))?;
+                docker
+                    .ping()
+                    .await
+                    .map_err(|err| format!("Docker daemon is not reachable: {err}"))?;
+                Ok(docker)
+            })
+            .await
+    }
+
+    /// True when a Docker daemon is reachable right now.
+    pub async fn is_available(&self) -> bool {
+        self.client().await.is_ok()
     }
 
     pub async fn run_scan(
         &self,
         scanner: &ScannerDefinition,
         target: &str,
-    ) -> Result<(ScanExecution, Vec<NormalizedFinding>), String> {
+        options: &ScanOptions,
+    ) -> ScannerRunResult {
+        match self.execute(scanner, target, options).await {
+            Ok(result) => result,
+            Err(error) => ScannerRunResult::failed(&scanner.name, error),
+        }
+    }
+
+    async fn execute(
+        &self,
+        scanner: &ScannerDefinition,
+        target: &str,
+        options: &ScanOptions,
+    ) -> Result<ScannerRunResult, String> {
         if scanner.image.trim().is_empty() {
             return Err(format!(
                 "scanner '{}' is missing a container image; all scanners must run in containers",
                 scanner.name
             ));
         }
+        if scanner.command_template.is_empty() {
+            return Err(format!(
+                "scanner '{}' is missing an executable command template",
+                scanner.name
+            ));
+        }
 
-        self.docker
-            .ping()
-            .await
-            .map_err(|err| format!("docker ping failed: {err}"))?;
+        // Credentials are checked before anything expensive happens, and a
+        // missing token is a skip rather than a failure so `mode=all` stays quiet.
+        let auth_env = match build_scanner_auth_env(&scanner.name) {
+            Ok(env) => env,
+            Err(missing) => return Ok(ScannerRunResult::skipped(&scanner.name, missing)),
+        };
 
-        // Resolve and validate the target before touching Docker.
-        let host_target = resolve_target(target)?;
+        let docker = self.client().await?;
+        let mount = resolve_target(target)?;
 
         let resolved_image = resolve_image_for_pull(&scanner.image);
-        self.ensure_image_available(&resolved_image).await?;
+        self.ensure_image_available(docker, &resolved_image).await?;
 
         let run_id = format!("run-{}", Uuid::new_v4());
         let container_name = format!("audit-scan-{}", Uuid::new_v4());
         let raw_command = scanner
             .command_template
             .iter()
-            // container_target is always "." — the mount root IS the target.
-            .map(|entry| entry.replace("{target}", "."))
+            .map(|entry| entry.replace("{target}", &mount.container_target))
             .collect::<Vec<_>>();
-        if raw_command.is_empty() {
-            return Err(format!(
-                "scanner '{}' is missing an executable command template; all scanners must be container-runnable",
-                scanner.name
-            ));
-        }
-        // Wrap in sh -c when an install script is present so tools are available at run time.
+
+        // Wrap in `sh -c` when an install script is present so the tool exists
+        // by the time the main command runs.
         let command = match &scanner.install_script {
             Some(setup) => {
-                let main_cmd = raw_command.join(" ");
+                let main_cmd = shell_script_for(&raw_command);
                 vec![
                     "sh".to_string(),
                     "-c".to_string(),
@@ -78,13 +148,11 @@ impl DockerScannerRunner {
 
         let cache = image_cache_config(&resolved_image, &scanner.name);
         let mut container_env = cache.env;
-        let auth_env = build_scanner_auth_env(&scanner.name)?;
         container_env.extend(auth_env);
-        let mut binds = vec![format!("{}:/workspace:ro", host_target.display())];
+        let mut binds = vec![format!("{}:/workspace:ro", mount.host_dir.display())];
         binds.extend(cache.volumes);
 
-        let create_response = self
-            .docker
+        let create_response = docker
             .create_container(
                 Some(
                     CreateContainerOptionsBuilder::new()
@@ -93,6 +161,13 @@ impl DockerScannerRunner {
                 ),
                 ContainerCreateBody {
                     image: Some(resolved_image.clone()),
+                    // Clear the image's ENTRYPOINT so `command` is always the
+                    // literal argv. Many scanner images set the tool itself as
+                    // the entrypoint, which would otherwise swallow the command
+                    // template (`gitleaks` + `["gitleaks","detect"]` becomes
+                    // `gitleaks gitleaks detect`) or pass `sh -c ...` to the
+                    // tool as arguments.
+                    entrypoint: Some(vec![]),
                     cmd: Some(command.clone()),
                     working_dir: Some("/workspace".to_string()),
                     attach_stdout: Some(true),
@@ -103,10 +178,9 @@ impl DockerScannerRunner {
                         auto_remove: Some(false),
                         // Prevent privilege escalation inside the container.
                         security_opt: Some(vec!["no-new-privileges:true".to_string()]),
-                        // Drop all Linux capabilities; scanners are analysis tools, not system daemons.
+                        // Scanners are analysis tools, not system daemons.
                         cap_drop: Some(vec!["ALL".to_string()]),
-                        // 4 GB ceiling — compilation is memory-hungry but shouldn't be unbounded.
-                        memory: Some(4 * 1024 * 1024 * 1024),
+                        memory: Some(CONTAINER_MEMORY_BYTES),
                         ..Default::default()
                     }),
                     ..Default::default()
@@ -118,45 +192,185 @@ impl DockerScannerRunner {
             })?;
 
         let container_id = create_response.id;
-        // Set up the wait stream BEFORE starting so we don't miss the exit event
-        // if the container finishes before the next await point.
-        let mut wait_stream = self.docker.wait_container(&container_id, None);
+        let started = Instant::now();
 
-        if let Err(err) = self.docker.start_container(&container_id, None).await {
-            self.cleanup_container(&container_id).await;
+        // Set up the wait stream BEFORE starting so we don't miss the exit
+        // event if the container finishes before the next await point.
+        let mut wait_stream = docker.wait_container(&container_id, None);
+
+        if let Err(err) = docker.start_container(&container_id, None).await {
+            self.cleanup_container(docker, &container_id).await;
             return Err(format!(
                 "failed to start scanner container '{container_id}': {err}"
             ));
         }
 
-        let wait_result = match wait_stream.next().await {
-            Some(Ok(result)) => result,
+        let timeout = options
+            .timeout
+            .or_else(|| scanner.timeout_secs.map(Duration::from_secs))
+            .unwrap_or_else(|| Duration::from_secs(DEFAULT_TIMEOUT_SECS));
+
+        let wait_result = match tokio::time::timeout(timeout, wait_stream.next()).await {
+            Ok(Some(Ok(result))) => Ok(result),
             // Docker surfaces non-zero container exits as DockerContainerWaitError.
-            // Convert to a synthetic response so the exit code reaches our logging path.
-            Some(Err(BollardError::DockerContainerWaitError { code, .. })) => {
-                bollard::models::ContainerWaitResponse {
+            // Convert to a synthetic response so the exit code reaches our logic.
+            Ok(Some(Err(BollardError::DockerContainerWaitError { code, .. }))) => {
+                Ok(bollard::models::ContainerWaitResponse {
                     status_code: code,
                     error: None,
-                }
+                })
             }
-            Some(Err(err)) => {
-                self.cleanup_container(&container_id).await;
-                return Err(format!(
-                    "failed while waiting for scanner container '{container_id}': {err}"
-                ));
+            Ok(Some(Err(err))) => Err(format!(
+                "failed while waiting for scanner container '{container_id}': {err}"
+            )),
+            Ok(None) => Err(format!(
+                "scanner container '{container_id}' exited without a wait result"
+            )),
+            Err(_elapsed) => {
+                // Kill first so the logs we collect reflect work actually done.
+                let _ = docker
+                    .kill_container(
+                        &container_id,
+                        Some(KillContainerOptionsBuilder::new().signal("SIGKILL").build()),
+                    )
+                    .await;
+                let logs = self
+                    .collect_logs(docker, &container_id)
+                    .await
+                    .map(|output| output.combined);
+                self.cleanup_container(docker, &container_id).await;
+
+                return Ok(ScannerRunResult {
+                    scanner: scanner.name.clone(),
+                    status: RunStatus::Timeout,
+                    execution: Some(ScanExecution {
+                        run_id,
+                        image: resolved_image,
+                        command,
+                        status: "timeout".to_string(),
+                        exit_code: None,
+                        duration_ms: started.elapsed().as_millis() as u64,
+                        notes: format!(
+                            "Killed after exceeding the {}s budget for this scanner.",
+                            timeout.as_secs()
+                        ),
+                        logs: logs.map(|logs| trim_for_payload(&logs, LOG_EXCERPT_CHARS)),
+                    }),
+                    findings: vec![],
+                    error: Some(format!(
+                        "scanner '{}' exceeded its {}s time budget and was killed",
+                        scanner.name,
+                        timeout.as_secs()
+                    )),
+                });
             }
+        };
+
+        let wait_result = match wait_result {
+            Ok(result) => result,
+            Err(error) => {
+                self.cleanup_container(docker, &container_id).await;
+                return Err(error);
+            }
+        };
+
+        let output = match self.collect_logs(docker, &container_id).await {
+            Some(output) => output,
             None => {
-                self.cleanup_container(&container_id).await;
+                self.cleanup_container(docker, &container_id).await;
                 return Err(format!(
-                    "scanner container '{container_id}' exited without wait result"
+                    "failed to read logs from scanner container '{container_id}'"
                 ));
             }
         };
 
-        let logs = match self
-            .docker
+        self.cleanup_container(docker, &container_id).await;
+
+        let exit_code = wait_result.status_code;
+        let duration_ms = started.elapsed().as_millis() as u64;
+        let excerpt = trim_for_payload(&output.combined, LOG_EXCERPT_CHARS);
+
+        // Parse the FULL buffer — truncating first would shred any real
+        // JSON/SARIF report. Try the clean stdout stream first; fall back to
+        // the merged stream for tools that report on stderr.
+        let ctx = ParseContext::new(scanner, target);
+        let parsed =
+            parsers::parse(&ctx, &output.stdout).or_else(|| parsers::parse(&ctx, &output.combined));
+        let recognized_output = parsed.is_some();
+        let findings = parsed.unwrap_or_default();
+
+        let exit_ok = scanner.success_exit_codes.contains(&exit_code);
+        // A tool that produced parseable findings clearly ran, whatever it
+        // decided to exit with. This keeps unusual exit codes from turning a
+        // useful scan into a reported failure.
+        let ran_successfully = exit_ok || !findings.is_empty();
+
+        let status = if !ran_successfully {
+            RunStatus::ToolError
+        } else if !findings.is_empty() {
+            RunStatus::Findings
+        } else if recognized_output {
+            RunStatus::Clean
+        } else {
+            // Either no parser exists for this scanner, or it did not emit the
+            // report it was asked for — a tool that silently failed must never
+            // be reported as clean.
+            RunStatus::Unparsed
+        };
+
+        let error = (!ran_successfully).then(|| {
+            format!(
+                "scanner '{}' exited with code {} (expected one of {:?}); logs: {}",
+                scanner.name, exit_code, scanner.success_exit_codes, excerpt
+            )
+        });
+
+        let notes = match status {
+            RunStatus::ToolError => {
+                format!("Scanner exited with unexpected code {exit_code} after {duration_ms}ms.")
+            }
+            RunStatus::Unparsed => format!(
+                "Scanner completed with exit code {exit_code} but produced no output this parser recognized, so raw logs are attached. Either '{}' has no parser, or it did not emit the expected report.",
+                scanner.name
+            ),
+            _ => format!("Scanner completed in {duration_ms}ms with exit code {exit_code}."),
+        };
+
+        // Logs are attached when explicitly requested, when we could not
+        // normalize the output, or when the run failed — i.e. whenever they
+        // are the only diagnostic the caller has.
+        let attach_logs = options.include_raw_logs
+            || matches!(status, RunStatus::ToolError | RunStatus::Unparsed);
+
+        Ok(ScannerRunResult {
+            scanner: scanner.name.clone(),
+            status,
+            execution: Some(ScanExecution {
+                run_id,
+                image: resolved_image,
+                command,
+                status: status.as_str().to_string(),
+                exit_code: Some(exit_code),
+                duration_ms,
+                notes,
+                logs: attach_logs.then_some(excerpt),
+            }),
+            findings,
+            error,
+        })
+    }
+
+    /// Collect container output, keeping stdout separate from the merged view.
+    ///
+    /// Docker interleaves the two streams, which corrupts a report written to
+    /// stdout the moment the tool (or `go run`) writes a line to stderr —
+    /// gosec's SARIF arrives with `exit status 1` spliced in before its
+    /// closing brace. Parsers get the clean stdout stream; humans get the
+    /// merged one.
+    async fn collect_logs(&self, docker: &Docker, container_id: &str) -> Option<ContainerOutput> {
+        let chunks = docker
             .logs(
-                &container_id,
+                container_id,
                 Some(
                     LogsOptionsBuilder::new()
                         .stdout(true)
@@ -168,86 +382,30 @@ impl DockerScannerRunner {
             )
             .try_collect::<Vec<_>>()
             .await
-        {
-            Ok(logs) => logs,
-            Err(err) => {
-                self.cleanup_container(&container_id).await;
-                return Err(format!(
-                    "failed to read logs from scanner container '{container_id}': {err}"
-                ));
+            .ok()?;
+
+        let mut output = ContainerOutput::default();
+        for chunk in chunks {
+            if output.combined.len() >= MAX_LOG_BYTES {
+                break;
             }
-        };
-
-        self.cleanup_container(&container_id).await;
-
-        let combined_logs = logs
-            .into_iter()
-            .map(|output| String::from_utf8_lossy(output.into_bytes().as_ref()).into_owned())
-            .collect::<Vec<_>>()
-            .join("");
-        let trimmed_logs = trim_for_payload(&combined_logs, 24_000);
-        if wait_result.status_code != 0 {
-            return Err(format!(
-                "scanner '{}' failed with exit code {}. logs: {}",
-                scanner.name, wait_result.status_code, trimmed_logs
-            ));
+            let is_stdout = matches!(chunk, LogOutput::StdOut { .. });
+            let text = String::from_utf8_lossy(chunk.into_bytes().as_ref()).into_owned();
+            if is_stdout {
+                output.stdout.push_str(&text);
+            }
+            output.combined.push_str(&text);
         }
 
-        let execution = ScanExecution {
-            run_id: run_id.clone(),
-            image: resolved_image.clone(),
-            command: command.clone(),
-            status: "completed".to_string(),
-            notes: format!(
-                "Scanner completed in container '{}' with exit code {}.",
-                container_id, wait_result.status_code
-            ),
-        };
-        let mut findings = parse_scanner_output(scanner, target, &run_id, &trimmed_logs);
-        if findings.is_empty() {
-            findings.push(NormalizedFinding {
-                id: format!("{}:run:{target}:{}", scanner.name, run_id),
-                scanner: scanner.name.clone(),
-                category: scanner
-                    .categories
-                    .first()
-                    .cloned()
-                    .unwrap_or_else(|| "general".to_string()),
-                severity: "info".to_string(),
-                title: "Scanner completed".to_string(),
-                description: "Scanner command completed successfully in an isolated container. Output is attached in raw payload until parser-level normalization is added.".to_string(),
-                location: FindingLocation {
-                    path: Some(target.to_string()),
-                    line: None,
-                    column: None,
-                },
-                fingerprint: run_id,
-                remediation: "Add scanner-specific output parsers to convert command output into first-class normalized findings.".to_string(),
-                references: vec![
-                    "https://docs.rs/bollard/latest/bollard/".to_string(),
-                    "https://modelcontextprotocol.io/specification/".to_string(),
-                ],
-                raw: json!({
-                    "scaffold": false,
-                    "image": resolved_image,
-                    "isolation": "docker",
-                    "registry_override": env::var("REGISTRY").ok(),
-                    "container_id": container_id,
-                    "host_target": host_target.display().to_string(),
-                    "stdout_stderr": trimmed_logs
-                }),
-            });
-        }
-
-        Ok((execution, findings))
+        Some(output)
     }
 
-    async fn ensure_image_available(&self, image: &str) -> Result<(), String> {
-        if self.docker.inspect_image(image).await.is_ok() {
+    async fn ensure_image_available(&self, docker: &Docker, image: &str) -> Result<(), String> {
+        if docker.inspect_image(image).await.is_ok() {
             return Ok(());
         }
 
-        self.docker
+        docker
             .create_image(
                 Some(
                     CreateImageOptionsBuilder::default()
@@ -264,9 +422,8 @@ impl DockerScannerRunner {
         Ok(())
     }
 
-    async fn cleanup_container(&self, container_id: &str) {
-        let _ = self
-            .docker
+    async fn cleanup_container(&self, docker: &Docker, container_id: &str) {
+        let _ = docker
             .remove_container(
                 container_id,
                 Some(RemoveContainerOptionsBuilder::new().force(true).build()),
@@ -275,30 +432,98 @@ impl DockerScannerRunner {
     }
 }
 
-/// Resolve `target` to a canonicalized absolute directory path on the host.
-/// Relative paths are resolved against the process CWD.
-fn resolve_target(target: &str) -> Result<PathBuf, String> {
-    let raw = if PathBuf::from(target).is_absolute() {
-        PathBuf::from(target)
+/// Render a command template as a single shell script line, for splicing after
+/// an install script.
+///
+/// Most templates are already `["sh", "-c", "<script>"]`; naively joining those
+/// with spaces produces `sh -c cargo clippy --all-targets`, where the shell
+/// takes only `cargo` as the script and silently runs the wrong thing. Unwrap
+/// that form and reuse the script verbatim; quote anything else.
+fn shell_script_for(command: &[String]) -> String {
+    if let [shell, flag, script] = command
+        && (shell == "sh" || shell == "bash")
+        && flag == "-c"
+    {
+        return script.clone();
+    }
+
+    command
+        .iter()
+        .map(|argument| shell_quote(argument))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Single-quote an argument for POSIX sh.
+fn shell_quote(argument: &str) -> String {
+    if !argument.is_empty()
+        && argument
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || "._-/:=@+,".contains(ch))
+    {
+        return argument.to_string();
+    }
+    format!("'{}'", argument.replace('\'', r"'\''"))
+}
+
+/// A validated scan target: the host directory to bind-mount, plus the path
+/// the scanner should be pointed at inside the container.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedTarget {
+    pub host_dir: PathBuf,
+    pub container_target: String,
+}
+
+/// Resolve `target` to a canonicalized host directory. A file target mounts
+/// its parent directory and scopes the scanner to that one file.
+pub fn resolve_target(target: &str) -> Result<ResolvedTarget, String> {
+    let trimmed = target.trim();
+    if trimmed.is_empty() {
+        return Err("target path must not be empty".to_string());
+    }
+
+    let raw = if PathBuf::from(trimmed).is_absolute() {
+        PathBuf::from(trimmed)
     } else {
         env::current_dir()
-            .map_err(|e| format!("failed to read CWD: {e}"))?
-            .join(target)
+            .map_err(|err| format!("failed to read CWD: {err}"))?
+            .join(trimmed)
     };
 
     if !raw.exists() {
         return Err(format!("target path does not exist: '{}'", raw.display()));
     }
-    if !raw.is_dir() {
-        return Err(format!(
-            "target must be a directory, got file: '{}'",
-            raw.display()
-        ));
+
+    // Canonicalize resolves symlinks so the bind-mount path is unambiguous.
+    let canonical = raw
+        .canonicalize()
+        .map_err(|err| format!("failed to canonicalize '{}': {err}", raw.display()))?;
+
+    if canonical.is_dir() {
+        return Ok(ResolvedTarget {
+            host_dir: canonical,
+            container_target: ".".to_string(),
+        });
     }
 
-    // Canonicalize resolves symlinks so the Docker bind-mount path is unambiguous.
-    raw.canonicalize()
-        .map_err(|e| format!("failed to canonicalize '{}': {e}", raw.display()))
+    let parent = canonical
+        .parent()
+        .ok_or_else(|| {
+            format!(
+                "target file '{}' has no parent directory",
+                canonical.display()
+            )
+        })?
+        .to_path_buf();
+    let file_name = canonical
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| format!("target file '{}' has a non-UTF-8 name", canonical.display()))?;
+
+    Ok(ResolvedTarget {
+        host_dir: parent,
+        container_target: format!("./{file_name}"),
+    })
 }
 
 fn resolve_image_for_pull(image: &str) -> String {
@@ -359,7 +584,6 @@ struct CacheConfig {
 ///        audit-go-build-cache (shared)  — build cache; Go uses per-entry locking
 ///
 /// Node   audit-npm-cache (shared)       — npm tarball cache (content-addressed)
-///        audit-pnpm-store (shared)      — pnpm content store used by pnpx
 ///
 /// Python audit-uv-cache (shared)        — uv wheel/sdist download cache
 ///        audit-uv-tools (shared)        — uvx tool installs (bandit, ruff, …)
@@ -400,6 +624,14 @@ fn image_cache_config(image: &str, scanner_name: &str) -> CacheConfig {
                 "GOMODCACHE=/cache/go-mod".to_string(),
                 "GOCACHE=/cache/go-build".to_string(),
                 "GOPATH=/cache/go-mod".to_string(),
+                // `go run tool@latest` must not be blocked by a repo's vendor
+                // directory or a proxy-less environment.
+                "GOFLAGS=-mod=mod".to_string(),
+                // The golang image pins GOTOOLCHAIN=local, which makes every
+                // `go run tool@latest` fail as soon as the tool's go.mod
+                // requires a newer Go than the base image ships. `auto` lets
+                // Go fetch the toolchain the tool asks for.
+                "GOTOOLCHAIN=auto".to_string(),
             ],
         }
     } else if image.contains("node") {
@@ -449,6 +681,8 @@ fn image_cache_config(image: &str, scanner_name: &str) -> CacheConfig {
             env: vec![
                 "COMPOSER_CACHE_DIR=/cache/composer-cache".to_string(),
                 "COMPOSER_HOME=/cache/composer-home".to_string(),
+                // Global vendor binaries live under COMPOSER_HOME.
+                "PATH=/cache/composer-home/vendor/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string(),
             ],
         }
     } else if image.contains("dotnet") {
@@ -462,6 +696,8 @@ fn image_cache_config(image: &str, scanner_name: &str) -> CacheConfig {
                 // Redirects global tool installs and CLI telemetry away from /root.
                 "DOTNET_CLI_HOME=/cache/dotnet-home".to_string(),
                 "HOME=/cache/dotnet-home".to_string(),
+                "DOTNET_CLI_TELEMETRY_OPTOUT=1".to_string(),
+                "PATH=/cache/dotnet-home/.dotnet/tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string(),
             ],
         }
     } else if image.contains("bridgecrew/checkov") {
@@ -512,7 +748,9 @@ fn trim_for_payload(text: &str, max_chars: usize) -> String {
     if text.chars().count() <= max_chars {
         return text.to_string();
     }
-    text.chars().take(max_chars).collect()
+
+    let head = text.chars().take(max_chars).collect::<String>();
+    format!("{head}\n… output truncated at {max_chars} characters …")
 }
 
 #[derive(Debug)]
@@ -551,6 +789,11 @@ fn scanner_auth_env_config(scanner_name: &str) -> ScannerAuthEnvConfig {
     }
 }
 
+/// Environment variables a scanner cannot run without, for `list_scanners`.
+pub fn required_env_for(scanner_name: &str) -> &'static [&'static str] {
+    scanner_auth_env_config(scanner_name).required
+}
+
 fn build_scanner_auth_env(scanner_name: &str) -> Result<Vec<String>, String> {
     let config = scanner_auth_env_config(scanner_name);
     let (env, missing) = collect_allowlisted_env(&config, |key| env::var(key).ok());
@@ -559,7 +802,7 @@ fn build_scanner_auth_env(scanner_name: &str) -> Result<Vec<String>, String> {
     }
 
     Err(format!(
-        "scanner '{}' requires environment variable(s): {}. Set these variables before running this scanner.",
+        "scanner '{}' requires environment variable(s): {}. Set these on the host before running this scanner.",
         scanner_name,
         missing.join(", ")
     ))
@@ -589,380 +832,85 @@ where
     (env_pairs, missing)
 }
 
-fn parse_scanner_output(
-    scanner: &ScannerDefinition,
-    target: &str,
-    run_id: &str,
-    logs: &str,
-) -> Vec<NormalizedFinding> {
-    match scanner.name.as_str() {
-        "checkov" => parse_checkov_output(scanner, target, run_id, logs),
-        "trivy-config" => parse_trivy_config_output(scanner, target, run_id, logs),
-        _ => Vec::new(),
-    }
-}
-
-fn parse_checkov_output(
-    scanner: &ScannerDefinition,
-    target: &str,
-    run_id: &str,
-    logs: &str,
-) -> Vec<NormalizedFinding> {
-    let json = match extract_json_payload(logs) {
-        Some(value) => value,
-        None => return Vec::new(),
-    };
-
-    let failed_checks = json
-        .get("results")
-        .and_then(|value| value.get("failed_checks"))
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-
-    failed_checks
-        .into_iter()
-        .map(|check| {
-            let check_id = check
-                .get("check_id")
-                .and_then(Value::as_str)
-                .unwrap_or("CHECKOV_UNKNOWN");
-            let title = check
-                .get("check_name")
-                .and_then(Value::as_str)
-                .unwrap_or("Checkov policy violation")
-                .to_string();
-            let path = check
-                .get("file_path")
-                .and_then(Value::as_str)
-                .map(normalize_workspace_path)
-                .or_else(|| Some(target.to_string()));
-            let line = check
-                .get("file_line_range")
-                .and_then(Value::as_array)
-                .and_then(|range| range.first())
-                .and_then(Value::as_u64)
-                .and_then(|value| u32::try_from(value).ok());
-            let severity = check
-                .get("severity")
-                .and_then(Value::as_str)
-                .map(normalize_severity)
-                .unwrap_or_else(|| "medium".to_string());
-            let description = check
-                .get("description")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-                .unwrap_or_else(|| {
-                    check
-                        .get("check_result")
-                        .and_then(|result| result.get("result"))
-                        .and_then(Value::as_str)
-                        .unwrap_or("Policy check failed.")
-                        .to_string()
-                });
-            let remediation = check
-                .get("guideline")
-                .and_then(Value::as_str)
-                .unwrap_or("Review the policy failure and update the infrastructure resource to satisfy the control.")
-                .to_string();
-            let mut references = Vec::new();
-            if let Some(url) = check.get("guideline").and_then(Value::as_str) {
-                references.push(url.to_string());
-            }
-
-            NormalizedFinding {
-                id: format!("checkov:{check_id}:{run_id}"),
-                scanner: scanner.name.clone(),
-                category: scanner
-                    .categories
-                    .first()
-                    .cloned()
-                    .unwrap_or_else(|| "Security (IaC)".to_string()),
-                severity,
-                title,
-                description,
-                location: FindingLocation {
-                    path,
-                    line,
-                    column: None,
-                },
-                fingerprint: format!("checkov:{check_id}:{run_id}"),
-                remediation,
-                references,
-                raw: check,
-            }
-        })
-        .collect()
-}
-
-fn parse_trivy_config_output(
-    scanner: &ScannerDefinition,
-    target: &str,
-    run_id: &str,
-    logs: &str,
-) -> Vec<NormalizedFinding> {
-    let json = match extract_json_payload(logs) {
-        Some(value) => value,
-        None => return Vec::new(),
-    };
-
-    let results = json
-        .get("Results")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-
-    let mut findings = Vec::new();
-
-    for result in results {
-        let target_path = result
-            .get("Target")
-            .and_then(Value::as_str)
-            .map(normalize_workspace_path)
-            .unwrap_or_else(|| target.to_string());
-
-        let misconfigurations = result
-            .get("Misconfigurations")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-
-        for issue in misconfigurations {
-            let status = issue
-                .get("Status")
-                .and_then(Value::as_str)
-                .unwrap_or("FAIL");
-            if status.eq_ignore_ascii_case("pass") {
-                continue;
-            }
-
-            let issue_id = issue
-                .get("ID")
-                .and_then(Value::as_str)
-                .or_else(|| issue.get("AVDID").and_then(Value::as_str))
-                .unwrap_or("TRIVY_CONFIG_UNKNOWN");
-            let title = issue
-                .get("Title")
-                .and_then(Value::as_str)
-                .unwrap_or("Trivy configuration finding")
-                .to_string();
-            let description = issue
-                .get("Description")
-                .and_then(Value::as_str)
-                .or_else(|| issue.get("Message").and_then(Value::as_str))
-                .unwrap_or("Configuration issue detected by Trivy.")
-                .to_string();
-            let remediation = issue
-                .get("Resolution")
-                .and_then(Value::as_str)
-                .unwrap_or("Update the configuration to satisfy the failed policy.")
-                .to_string();
-            let severity = issue
-                .get("Severity")
-                .and_then(Value::as_str)
-                .map(normalize_severity)
-                .unwrap_or_else(|| "medium".to_string());
-            let line = issue
-                .get("CauseMetadata")
-                .and_then(|metadata| metadata.get("StartLine"))
-                .and_then(Value::as_u64)
-                .and_then(|value| u32::try_from(value).ok());
-
-            let mut references = Vec::new();
-            if let Some(url) = issue.get("PrimaryURL").and_then(Value::as_str) {
-                references.push(url.to_string());
-            }
-            if let Some(additional_refs) = issue.get("References").and_then(Value::as_array) {
-                references.extend(
-                    additional_refs
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .map(str::to_string),
-                );
-            }
-
-            findings.push(NormalizedFinding {
-                id: format!("trivy-config:{issue_id}:{run_id}"),
-                scanner: scanner.name.clone(),
-                category: scanner
-                    .categories
-                    .first()
-                    .cloned()
-                    .unwrap_or_else(|| "Security (IaC)".to_string()),
-                severity,
-                title,
-                description,
-                location: FindingLocation {
-                    path: Some(target_path.clone()),
-                    line,
-                    column: None,
-                },
-                fingerprint: format!("trivy-config:{issue_id}:{run_id}"),
-                remediation,
-                references,
-                raw: issue,
-            });
-        }
-    }
-
-    findings
-}
-
-fn extract_json_payload(logs: &str) -> Option<Value> {
-    if let Ok(value) = serde_json::from_str::<Value>(logs) {
-        return Some(value);
-    }
-
-    let mut starts = logs
-        .char_indices()
-        .filter_map(|(index, ch)| match ch {
-            '{' | '[' => Some(index),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    starts.reverse();
-
-    for start in starts {
-        let Some(end) = find_json_end(logs, start) else {
-            continue;
-        };
-
-        if let Ok(value) = serde_json::from_str::<Value>(&logs[start..=end]) {
-            return Some(value);
-        }
-    }
-
-    None
-}
-
-fn find_json_end(input: &str, start: usize) -> Option<usize> {
-    let mut depth = 0_i32;
-    let mut in_string = false;
-    let mut escaped = false;
-
-    for (idx, ch) in input.char_indices().skip_while(|(idx, _)| *idx < start) {
-        if in_string {
-            if escaped {
-                escaped = false;
-                continue;
-            }
-
-            match ch {
-                '\\' => escaped = true,
-                '"' => in_string = false,
-                _ => {}
-            }
-            continue;
-        }
-
-        match ch {
-            '"' => in_string = true,
-            '{' | '[' => depth += 1,
-            '}' | ']' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(idx);
-                }
-                if depth < 0 {
-                    return None;
-                }
-            }
-            _ => {}
-        }
-    }
-
-    None
-}
-
-fn normalize_workspace_path(path: &str) -> String {
-    path.trim_start_matches("/workspace/")
-        .trim_start_matches("./")
-        .to_string()
-}
-
-fn normalize_severity(value: &str) -> String {
-    match value.to_ascii_lowercase().as_str() {
-        "critical" => "critical".to_string(),
-        "high" => "high".to_string(),
-        "medium" => "medium".to_string(),
-        "low" => "low".to_string(),
-        "info" | "informational" => "info".to_string(),
-        _ => "unknown".to_string(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        build_scanner_auth_env, collect_allowlisted_env, extract_json_payload,
-        normalize_workspace_path, parse_checkov_output, parse_trivy_config_output,
-        scanner_auth_env_config,
+        ScanOptions, build_scanner_auth_env, collect_allowlisted_env, required_env_for,
+        resolve_image_for_pull, resolve_target, scanner_auth_env_config, shell_quote,
+        shell_script_for, trim_for_payload,
     };
-    use crate::models::ScannerDefinition;
 
-    fn scanner(name: &str, category: &str) -> ScannerDefinition {
-        ScannerDefinition {
-            name: name.to_string(),
-            description: "test".to_string(),
-            image: "test-image".to_string(),
-            categories: vec![category.to_string()],
-            command_template: vec![],
-            install_script: None,
-        }
+    fn words(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|part| part.to_string()).collect()
     }
 
     #[test]
-    fn parses_checkov_failed_checks() {
-        let logs = r#"{"results":{"failed_checks":[{"check_id":"CKV_AWS_20","check_name":"S3 Bucket Public Read","description":"Bucket allows public read","file_path":"/workspace/terraform/main.tf","file_line_range":[7,13],"severity":"HIGH","guideline":"https://docs.bridgecrew.io/docs/s3_1-enable-s3-bucket-encryption"}]}}"#;
-        let findings = parse_checkov_output(
-            &scanner("checkov", "Security (IaC)"),
-            "infrastructure",
-            "run-1",
-            logs,
-        );
-
-        assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].severity, "high");
+    fn install_scripts_reuse_an_sh_c_body_instead_of_nesting_it() {
+        // Joining naively yields `sh -c cargo clippy --all-targets`, where the
+        // inner shell runs only `cargo` and drops every argument.
+        let command = words(&[
+            "sh",
+            "-c",
+            "cargo clippy --all-targets --message-format json",
+        ]);
         assert_eq!(
-            findings[0].location.path.as_deref(),
-            Some("terraform/main.tf")
+            shell_script_for(&command),
+            "cargo clippy --all-targets --message-format json"
         );
-        assert_eq!(findings[0].location.line, Some(7));
     }
 
     #[test]
-    fn parses_trivy_config_misconfigurations() {
-        let logs = r#"{"Results":[{"Target":"/workspace/k8s/deploy.yaml","Misconfigurations":[{"ID":"KSV001","AVDID":"AVD-KSV-001","Title":"Container should not run as root","Description":"Root containers increase attack surface.","Resolution":"Set securityContext.runAsNonRoot=true","Severity":"CRITICAL","Status":"FAIL","PrimaryURL":"https://avd.aquasec.com/misconfig/ksv001","CauseMetadata":{"StartLine":12}}]}]}"#;
-        let findings = parse_trivy_config_output(
-            &scanner("trivy-config", "Security (IaC)"),
-            "infrastructure",
-            "run-2",
-            logs,
-        );
+    fn install_scripts_quote_plain_argv_commands() {
+        let command = words(&["clang-tidy", "src/a b.c", "--"]);
+        assert_eq!(shell_script_for(&command), "clang-tidy 'src/a b.c' --");
+    }
 
-        assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].severity, "critical");
+    #[test]
+    fn shell_quoting_escapes_embedded_quotes() {
+        assert_eq!(shell_quote("plain-value"), "plain-value");
+        assert_eq!(shell_quote("two words"), "'two words'");
+        assert_eq!(shell_quote("it's"), r"'it'\''s'");
+    }
+
+    #[test]
+    fn resolves_directory_targets_to_the_mount_root() {
+        let target = resolve_target(env!("CARGO_MANIFEST_DIR")).expect("manifest dir resolves");
+        assert_eq!(target.container_target, ".");
+        assert!(target.host_dir.is_dir());
+    }
+
+    #[test]
+    fn resolves_file_targets_by_mounting_the_parent() {
+        let path = format!("{}/Cargo.toml", env!("CARGO_MANIFEST_DIR"));
+        let target = resolve_target(&path).expect("file resolves");
+        assert_eq!(target.container_target, "./Cargo.toml");
         assert_eq!(
-            findings[0].location.path.as_deref(),
-            Some("k8s/deploy.yaml")
+            target.host_dir,
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .canonicalize()
+                .expect("canonical")
         );
-        assert_eq!(findings[0].location.line, Some(12));
     }
 
     #[test]
-    fn extracts_json_payload_from_prefixed_logs() {
-        let logs = "INFO scanner started\n{\"Results\": []}\n";
-        let payload = extract_json_payload(logs);
-        assert!(payload.is_some());
+    fn rejects_missing_and_empty_targets() {
+        let error = resolve_target("/definitely/not/here").expect_err("should fail");
+        assert!(error.contains("does not exist"));
+        assert!(resolve_target("   ").is_err());
     }
 
     #[test]
-    fn normalizes_workspace_paths() {
-        assert_eq!(normalize_workspace_path("/workspace/a/b.tf"), "a/b.tf");
-        assert_eq!(
-            normalize_workspace_path("./k8s/deploy.yaml"),
-            "k8s/deploy.yaml"
-        );
+    fn registry_override_rewrites_image_references() {
+        // No REGISTRY set in the test environment: images pass through.
+        assert_eq!(resolve_image_for_pull("node:20-alpine"), "node:20-alpine");
+    }
+
+    #[test]
+    fn trimming_marks_truncated_output() {
+        let trimmed = trim_for_payload(&"x".repeat(100), 10);
+        assert!(trimmed.starts_with(&"x".repeat(10)));
+        assert!(trimmed.contains("truncated"));
+        assert_eq!(trim_for_payload("short", 10), "short");
     }
 
     #[test]
@@ -970,6 +918,8 @@ mod tests {
         let config = scanner_auth_env_config("snyk");
         assert!(config.allowlist.contains(&"SNYK_TOKEN"));
         assert_eq!(config.required, &["SNYK_TOKEN"]);
+        assert_eq!(required_env_for("snyk"), &["SNYK_TOKEN"]);
+        assert!(required_env_for("ruff").is_empty());
     }
 
     #[test]
@@ -988,5 +938,12 @@ mod tests {
     fn non_auth_scanner_requires_no_env() {
         let env = build_scanner_auth_env("ruff").expect("ruff should not require auth env");
         assert!(env.is_empty());
+    }
+
+    #[test]
+    fn default_scan_options_are_conservative() {
+        let options = ScanOptions::default();
+        assert!(options.timeout.is_none());
+        assert!(!options.include_raw_logs);
     }
 }
